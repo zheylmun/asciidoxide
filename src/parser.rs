@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use chumsky::{extra, input::ValueInput, prelude::*};
 
 use crate::asg::{Block, Document, Header, InlineNode, SpanNode, TextNode};
+use crate::diagnostic::{ParseDiagnostic, Severity};
 use crate::lexer::lex;
 use crate::span::{SourceIndex, SourceSpan};
 use crate::token::Token;
@@ -21,44 +22,51 @@ type Spanned<'a> = (Token<'a>, SourceSpan);
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Parse a full `AsciiDoc` document into its ASG.
+/// Parse a full `AsciiDoc` document into its ASG and any diagnostics.
 #[must_use]
-pub fn parse_doc(input: &str) -> Document<'_> {
+pub fn parse_doc(input: &str) -> (Document<'_>, Vec<ParseDiagnostic>) {
     let tokens = lex(input);
     let idx = SourceIndex::new(input);
 
     if tokens.is_empty() {
-        return Document {
-            attributes: None,
-            header: None,
-            blocks: Vec::new(),
-            location: None,
-        };
+        return (
+            Document {
+                attributes: None,
+                header: None,
+                blocks: Vec::new(),
+                location: None,
+            },
+            Vec::new(),
+        );
     }
 
-    let (header, body_start) = extract_header(&tokens, input, &idx);
+    let (header, body_start, mut diagnostics) = extract_header(&tokens, input, &idx);
     let body_tokens = &tokens[body_start..];
-    let blocks = build_blocks(body_tokens, input, &idx);
+    let (blocks, block_diags) = build_blocks(body_tokens, input, &idx);
+    diagnostics.extend(block_diags);
 
     // Document location: first content token → last content token.
     let doc_span = content_span(&tokens);
     let location = doc_span.map(|s| idx.location(&s));
 
-    Document {
-        attributes: if header.is_some() {
-            Some(HashMap::new())
-        } else {
-            None
+    (
+        Document {
+            attributes: if header.is_some() {
+                Some(HashMap::new())
+            } else {
+                None
+            },
+            header,
+            blocks,
+            location,
         },
-        header,
-        blocks,
-        location,
-    }
+        diagnostics,
+    )
 }
 
-/// Parse `AsciiDoc` inline content into inline nodes.
+/// Parse `AsciiDoc` inline content into inline nodes and any diagnostics.
 #[must_use]
-pub fn parse_inlines(input: &str) -> Vec<InlineNode<'_>> {
+pub fn parse_inlines(input: &str) -> (Vec<InlineNode<'_>>, Vec<ParseDiagnostic>) {
     let tokens = lex(input);
     let idx = SourceIndex::new(input);
     let trimmed = strip_trailing_newlines(&tokens);
@@ -73,14 +81,23 @@ pub fn parse_inlines(input: &str) -> Vec<InlineNode<'_>> {
 ///
 /// The parser produces `Vec<InlineNode>` from a token stream, using the source
 /// string for zero-copy text slicing and the source index for locations.
+///
+/// The `star_as_text` fallback lives *outside* the recursive parser so that it
+/// is only available at the top level — inside delimited spans (e.g., `*…*`)
+/// a `Star` token is never consumed as literal text, allowing `delimited_by`
+/// to match the closing delimiter.
 fn inline_parser<'tokens, 'src: 'tokens, I>(
     source: &'src str,
     idx: &'tokens SourceIndex,
-) -> impl Parser<'tokens, I, Vec<InlineNode<'src>>, extra::Default> + 'tokens
+) -> impl Parser<'tokens, I, Vec<InlineNode<'src>>, extra::Err<Rich<'tokens, Token<'src>, SourceSpan>>>
+       + 'tokens
 where
     I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
 {
-    recursive(|inline_content| {
+    // The recursive parser handles a single inline node (strong span or text
+    // run). It does NOT include `star_as_text`, so a `Star` token inside a
+    // delimited span remains available for the closing delimiter.
+    let single_inline = recursive(|single_inline| {
         // A text run: one or more tokens that are not `Star`.
         let text_run = any()
             .filter(|t: &Token| !matches!(t, Token::Star))
@@ -95,7 +112,12 @@ where
             });
 
         // Constrained strong: *inline_content*
-        let strong = inline_content
+        let inner_content = single_inline
+            .repeated()
+            .at_least(1)
+            .collect::<Vec<InlineNode<'src>>>();
+
+        let strong = inner_content
             .delimited_by(just(Token::Star), just(Token::Star))
             .map_with(move |inlines: Vec<InlineNode<'src>>, e| {
                 let span: SourceSpan = e.span();
@@ -108,20 +130,32 @@ where
             });
 
         choice((strong, text_run))
-            .repeated()
-            .at_least(1)
-            .collect()
-    })
+    });
+
+    // Lone star fallback: a `*` that doesn't start a strong span is treated
+    // as literal text. This is only available at the top level.
+    let star_as_text = just(Token::Star).map_with(move |_tok, e| {
+        let span: SourceSpan = e.span();
+        InlineNode::Text(TextNode {
+            value: &source[span.start..span.end],
+            location: Some(idx.location(&span)),
+        })
+    });
+
+    choice((single_inline, star_as_text))
+        .repeated()
+        .at_least(1)
+        .collect()
 }
 
-/// Run the inline parser on a token sub-slice.
+/// Run the inline parser on a token sub-slice, returning nodes and diagnostics.
 fn run_inline_parser<'tokens, 'src: 'tokens>(
     tokens: &'tokens [Spanned<'src>],
     source: &'src str,
     idx: &'tokens SourceIndex,
-) -> Vec<InlineNode<'src>> {
+) -> (Vec<InlineNode<'src>>, Vec<ParseDiagnostic>) {
     if tokens.is_empty() {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
     let last_span = tokens.last().expect("non-empty").1;
     let eoi = SourceSpan {
@@ -129,10 +163,20 @@ fn run_inline_parser<'tokens, 'src: 'tokens>(
         end: last_span.end,
     };
     let input = tokens.split_token_span(eoi);
-    inline_parser(source, idx)
+    let (output, errors) = inline_parser(source, idx)
         .parse(input)
-        .into_output()
-        .unwrap_or_default()
+        .into_output_errors();
+
+    let diagnostics = errors
+        .into_iter()
+        .map(|e| ParseDiagnostic {
+            span: *e.span(),
+            message: e.to_string(),
+            severity: Severity::Error,
+        })
+        .collect();
+
+    (output.unwrap_or_default(), diagnostics)
 }
 
 // ---------------------------------------------------------------------------
@@ -141,13 +185,13 @@ fn run_inline_parser<'tokens, 'src: 'tokens>(
 
 /// Detect a document header (`= Title`) at the start of the token stream.
 ///
-/// Returns `(Some(header), first_body_token_index)` when a header is found,
-/// or `(None, 0)` otherwise.
+/// Returns `(Some(header), first_body_token_index, diagnostics)` when a header
+/// is found, or `(None, 0, diagnostics)` otherwise.
 fn extract_header<'src>(
     tokens: &[Spanned<'src>],
     source: &'src str,
     idx: &SourceIndex,
-) -> (Option<Header<'src>>, usize) {
+) -> (Option<Header<'src>>, usize, Vec<ParseDiagnostic>) {
     // Header requires at least: Eq Whitespace <content>
     if tokens.len() >= 3
         && matches!(tokens[0].0, Token::Eq)
@@ -162,7 +206,7 @@ fn extract_header<'src>(
 
         if title_start < title_end {
             let title_tokens = &tokens[title_start..title_end];
-            let title_inlines = run_inline_parser(title_tokens, source, idx);
+            let (title_inlines, diagnostics) = run_inline_parser(title_tokens, source, idx);
 
             let header_start = tokens[0].1.start;
             let header_end = tokens[title_end - 1].1.end;
@@ -183,11 +227,11 @@ fn extract_header<'src>(
                 title_end
             };
 
-            return (Some(header), next);
+            return (Some(header), next, diagnostics);
         }
     }
 
-    (None, 0)
+    (None, 0, Vec::new())
 }
 
 /// Build block-level ASG nodes from a body token stream.
@@ -198,12 +242,16 @@ fn build_blocks<'src>(
     tokens: &[Spanned<'src>],
     source: &'src str,
     idx: &SourceIndex,
-) -> Vec<Block<'src>> {
+) -> (Vec<Block<'src>>, Vec<ParseDiagnostic>) {
     let groups = split_paragraphs(tokens);
-    groups
-        .into_iter()
-        .map(|para_tokens| make_paragraph(para_tokens, source, idx))
-        .collect()
+    let mut blocks = Vec::with_capacity(groups.len());
+    let mut diagnostics = Vec::new();
+    for para_tokens in groups {
+        let (block, diags) = make_paragraph(para_tokens, source, idx);
+        blocks.push(block);
+        diagnostics.extend(diags);
+    }
+    (blocks, diagnostics)
 }
 
 /// Split a token stream into paragraph groups at blank lines.
@@ -262,27 +310,30 @@ fn make_paragraph<'src>(
     tokens: &[Spanned<'src>],
     source: &'src str,
     idx: &SourceIndex,
-) -> Block<'src> {
+) -> (Block<'src>, Vec<ParseDiagnostic>) {
     let trimmed = strip_trailing_newlines(tokens);
-    let inlines = run_inline_parser(trimmed, source, idx);
+    let (inlines, diagnostics) = run_inline_parser(trimmed, source, idx);
 
     let span = content_span(trimmed);
     let location = span.map(|s| idx.location(&s));
 
-    Block {
-        name: "paragraph",
-        form: None,
-        delimiter: None,
-        title: None,
-        level: None,
-        variant: None,
-        marker: None,
-        inlines: Some(inlines),
-        blocks: None,
-        items: None,
-        principal: None,
-        location,
-    }
+    (
+        Block {
+            name: "paragraph",
+            form: None,
+            delimiter: None,
+            title: None,
+            level: None,
+            variant: None,
+            marker: None,
+            inlines: Some(inlines),
+            blocks: None,
+            items: None,
+            principal: None,
+            location,
+        },
+        diagnostics,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -330,7 +381,8 @@ mod tests {
 
     #[test]
     fn inline_plain_text() {
-        let nodes = parse_inlines("hello");
+        let (nodes, diags) = parse_inlines("hello");
+        assert!(diags.is_empty());
         assert_eq!(nodes.len(), 1);
         match &nodes[0] {
             InlineNode::Text(t) => {
@@ -345,7 +397,8 @@ mod tests {
 
     #[test]
     fn inline_strong() {
-        let nodes = parse_inlines("*s*");
+        let (nodes, diags) = parse_inlines("*s*");
+        assert!(diags.is_empty());
         assert_eq!(nodes.len(), 1);
         match &nodes[0] {
             InlineNode::Span(s) => {
@@ -364,11 +417,27 @@ mod tests {
         }
     }
 
+    #[test]
+    fn inline_lone_star_is_text() {
+        let (nodes, diags) = parse_inlines("*hello");
+        assert!(diags.is_empty());
+        assert_eq!(nodes.len(), 2);
+        match &nodes[0] {
+            InlineNode::Text(t) => assert_eq!(t.value, "*"),
+            InlineNode::Span(_) => panic!("expected Text for lone star"),
+        }
+        match &nodes[1] {
+            InlineNode::Text(t) => assert_eq!(t.value, "hello"),
+            InlineNode::Span(_) => panic!("expected Text"),
+        }
+    }
+
     // -- Document parsing tests ---------------------------------------------
 
     #[test]
     fn doc_empty() {
-        let doc = parse_doc("");
+        let (doc, diags) = parse_doc("");
+        assert!(diags.is_empty());
         assert!(doc.blocks.is_empty());
         assert!(doc.header.is_none());
         assert!(doc.location.is_none());
@@ -376,7 +445,8 @@ mod tests {
 
     #[test]
     fn doc_single_paragraph() {
-        let doc = parse_doc("hello world");
+        let (doc, diags) = parse_doc("hello world");
+        assert!(diags.is_empty());
         assert_eq!(doc.blocks.len(), 1);
         assert_eq!(doc.blocks[0].name, "paragraph");
         let inlines = doc.blocks[0].inlines.as_ref().unwrap();
@@ -389,7 +459,8 @@ mod tests {
 
     #[test]
     fn doc_sibling_paragraphs() {
-        let doc = parse_doc("para1\n\npara2");
+        let (doc, diags) = parse_doc("para1\n\npara2");
+        assert!(diags.is_empty());
         assert_eq!(doc.blocks.len(), 2);
         assert_eq!(doc.blocks[0].name, "paragraph");
         assert_eq!(doc.blocks[1].name, "paragraph");
@@ -397,7 +468,8 @@ mod tests {
 
     #[test]
     fn doc_header_body() {
-        let doc = parse_doc("= Title\n\nbody");
+        let (doc, diags) = parse_doc("= Title\n\nbody");
+        assert!(diags.is_empty());
         assert!(doc.header.is_some());
         let header = doc.header.as_ref().unwrap();
         assert_eq!(header.title.len(), 1);
@@ -411,14 +483,16 @@ mod tests {
 
     #[test]
     fn doc_body_only_no_attributes() {
-        let doc = parse_doc("just text");
+        let (doc, diags) = parse_doc("just text");
+        assert!(diags.is_empty());
         assert!(doc.attributes.is_none());
         assert!(doc.header.is_none());
     }
 
     #[test]
     fn doc_multiple_blank_lines() {
-        let doc = parse_doc("a\n\n\nb");
+        let (doc, diags) = parse_doc("a\n\n\nb");
+        assert!(diags.is_empty());
         assert_eq!(doc.blocks.len(), 2);
     }
 }

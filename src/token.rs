@@ -96,3 +96,37 @@ pub enum Token<'a> {
     /// whitespace, or newlines. References a slice of the input.
     Text(&'a str),
 }
+
+impl std::fmt::Display for Token<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Token::Newline => write!(f, "newline"),
+            Token::Whitespace => write!(f, "whitespace"),
+            Token::Eq => write!(f, "'='"),
+            Token::Star => write!(f, "'*'"),
+            Token::Underscore => write!(f, "'_'"),
+            Token::Backtick => write!(f, "'`'"),
+            Token::Hash => write!(f, "'#'"),
+            Token::Caret => write!(f, "'^'"),
+            Token::Tilde => write!(f, "'~'"),
+            Token::Plus => write!(f, "'+'"),
+            Token::Hyphen => write!(f, "'-'"),
+            Token::Dot => write!(f, "'.'"),
+            Token::Colon => write!(f, "':'"),
+            Token::Bang => write!(f, "'!'"),
+            Token::Slash => write!(f, "'/'"),
+            Token::Backslash => write!(f, "'\\'"),
+            Token::Pipe => write!(f, "'|'"),
+            Token::Comma => write!(f, "','"),
+            Token::DoubleQuote => write!(f, "'\"'"),
+            Token::SingleQuote => write!(f, "'''"),
+            Token::DoubleLeftAngle => write!(f, "'<<'"),
+            Token::DoubleRightAngle => write!(f, "'>>'"),
+            Token::LBracket => write!(f, "'['"),
+            Token::RBracket => write!(f, "']'"),
+            Token::LBrace => write!(f, "'{{'"),
+            Token::RBrace => write!(f, "'}}'"),
+            Token::Text(s) => write!(f, "{s}"),
+        }
+    }
+}

@@ -451,7 +451,7 @@ fn is_unsupported(path: &str) -> bool {
 // --- Test runners ---
 
 fn run_block_fixture(fixture: &TckFixture) -> Result<(), String> {
-    let document = parse_document(&fixture.input);
+    let (document, _diagnostics) = parse_document(&fixture.input);
     let json_doc = JsonDocument::from(&document);
     let mut actual = serde_json::to_value(&json_doc).map_err(|e| e.to_string())?;
 
@@ -479,7 +479,7 @@ fn run_block_fixture(fixture: &TckFixture) -> Result<(), String> {
 }
 
 fn run_inline_fixture(fixture: &TckFixture) -> Result<(), String> {
-    let inlines = parse_inline(&fixture.input);
+    let (inlines, _diagnostics) = parse_inline(&fixture.input);
     let json_inlines: Vec<_> = inlines.iter().map(JsonInlineNode::from).collect();
     let actual = serde_json::to_value(&json_inlines).map_err(|e| e.to_string())?;
 

@@ -1,9 +1,8 @@
 //! Source location tracking for the parser pipeline.
 //!
 //! [`SourceSpan`] is a lightweight, `Copy` span that stores byte offsets into
-//! the source text. It implements both [`chumsky::span::Span`] and
-//! [`ariadne::Span`], bridging the parser and error-reporting layers without
-//! any wrapper types.
+//! the source text. It implements [`chumsky::span::Span`], bridging the
+//! lexer/parser layers without any wrapper types.
 //!
 //! [`SourceIndex`] pre-computes line-start byte offsets so that a
 //! [`SourceSpan`] can be cheaply converted into the 1-based `[Position; 2]`
@@ -31,7 +30,7 @@ use crate::asg::{Location, Position};
 ///
 /// This type is intentionally minimal — just a start and end offset — so that
 /// it can be `Copy` and cheaply threaded through the parser pipeline. Both
-/// chumsky and ariadne accept it directly.
+/// chumsky accepts it directly via its [`Span`](chumsky::span::Span) impl.
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 pub struct SourceSpan {
     /// Inclusive start byte offset.
@@ -96,24 +95,6 @@ impl chumsky::span::Span for SourceSpan {
     }
 
     fn end(&self) -> Self::Offset {
-        self.end
-    }
-}
-
-// -- ariadne::Span -----------------------------------------------------------
-
-impl ariadne::Span for SourceSpan {
-    type SourceId = ();
-
-    fn source(&self) -> &Self::SourceId {
-        &()
-    }
-
-    fn start(&self) -> usize {
-        self.start
-    }
-
-    fn end(&self) -> usize {
         self.end
     }
 }
