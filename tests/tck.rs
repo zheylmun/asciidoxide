@@ -3,12 +3,210 @@
 //! Reads test cases from `language_repositories/asciidoc_tck/tests/` and compares
 //! the parser's ASG output against expected JSON, replicating the logic of the
 //! TCK's JavaScript test harness.
+//!
+//! Serializable mirror types (`Json*`) convert from the library's zero-copy ASG
+//! types via `From` impls, injecting the constant `name`/`type` fields that the
+//! TCK JSON format requires.
 
+use asciidoc::asg;
 use asciidoc::{parse_document, parse_inline};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+// --- JSON mirror types ---
+
+#[derive(Serialize)]
+struct JsonDocument<'a> {
+    name: &'static str,
+    #[serde(rename = "type")]
+    node_type: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attributes: Option<HashMap<&'a str, &'a str>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    header: Option<JsonHeader<'a>>,
+    blocks: Vec<JsonBlock<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    location: Option<JsonLocation>,
+}
+
+impl<'a> From<&asg::Document<'a>> for JsonDocument<'a> {
+    fn from(doc: &asg::Document<'a>) -> Self {
+        Self {
+            name: "document",
+            node_type: "block",
+            attributes: doc.attributes.clone(),
+            header: doc.header.as_ref().map(JsonHeader::from),
+            blocks: doc.blocks.iter().map(JsonBlock::from).collect(),
+            location: doc.location.as_ref().map(convert_location),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct JsonHeader<'a> {
+    title: Vec<JsonInlineNode<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    location: Option<JsonLocation>,
+}
+
+impl<'a> From<&asg::Header<'a>> for JsonHeader<'a> {
+    fn from(h: &asg::Header<'a>) -> Self {
+        Self {
+            title: h.title.iter().map(JsonInlineNode::from).collect(),
+            location: h.location.as_ref().map(convert_location),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct JsonBlock<'a> {
+    name: &'static str,
+    #[serde(rename = "type")]
+    node_type: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    form: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    delimiter: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title: Option<Vec<JsonInlineNode<'a>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    level: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    variant: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    marker: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    inlines: Option<Vec<JsonInlineNode<'a>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    blocks: Option<Vec<JsonBlock<'a>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    items: Option<Vec<JsonBlock<'a>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    principal: Option<Vec<JsonInlineNode<'a>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    location: Option<JsonLocation>,
+}
+
+impl<'a> From<&asg::Block<'a>> for JsonBlock<'a> {
+    fn from(b: &asg::Block<'a>) -> Self {
+        Self {
+            name: b.name,
+            node_type: "block",
+            form: b.form,
+            delimiter: b.delimiter,
+            title: b
+                .title
+                .as_ref()
+                .map(|v| v.iter().map(JsonInlineNode::from).collect()),
+            level: b.level,
+            variant: b.variant,
+            marker: b.marker,
+            inlines: b
+                .inlines
+                .as_ref()
+                .map(|v| v.iter().map(JsonInlineNode::from).collect()),
+            blocks: b
+                .blocks
+                .as_ref()
+                .map(|v| v.iter().map(JsonBlock::from).collect()),
+            items: b
+                .items
+                .as_ref()
+                .map(|v| v.iter().map(JsonBlock::from).collect()),
+            principal: b
+                .principal
+                .as_ref()
+                .map(|v| v.iter().map(JsonInlineNode::from).collect()),
+            location: b.location.as_ref().map(convert_location),
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum JsonInlineNode<'a> {
+    Text(JsonTextNode<'a>),
+    Span(JsonSpanNode<'a>),
+}
+
+impl<'a> From<&asg::InlineNode<'a>> for JsonInlineNode<'a> {
+    fn from(node: &asg::InlineNode<'a>) -> Self {
+        match node {
+            asg::InlineNode::Text(t) => Self::Text(JsonTextNode::from(t)),
+            asg::InlineNode::Span(s) => Self::Span(JsonSpanNode::from(s)),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct JsonTextNode<'a> {
+    name: &'static str,
+    #[serde(rename = "type")]
+    node_type: &'static str,
+    value: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    location: Option<JsonLocation>,
+}
+
+impl<'a> From<&asg::TextNode<'a>> for JsonTextNode<'a> {
+    fn from(t: &asg::TextNode<'a>) -> Self {
+        Self {
+            name: "text",
+            node_type: "string",
+            value: t.value,
+            location: t.location.as_ref().map(convert_location),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct JsonSpanNode<'a> {
+    name: &'static str,
+    #[serde(rename = "type")]
+    node_type: &'static str,
+    variant: &'static str,
+    form: &'static str,
+    inlines: Vec<JsonInlineNode<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    location: Option<JsonLocation>,
+}
+
+impl<'a> From<&asg::SpanNode<'a>> for JsonSpanNode<'a> {
+    fn from(s: &asg::SpanNode<'a>) -> Self {
+        Self {
+            name: "span",
+            node_type: "inline",
+            variant: s.variant,
+            form: s.form,
+            inlines: s.inlines.iter().map(JsonInlineNode::from).collect(),
+            location: s.location.as_ref().map(convert_location),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct JsonPosition {
+    line: usize,
+    col: usize,
+}
+
+type JsonLocation = [JsonPosition; 2];
+
+impl From<&asg::Position> for JsonPosition {
+    fn from(p: &asg::Position) -> Self {
+        Self {
+            line: p.line,
+            col: p.col,
+        }
+    }
+}
+
+fn convert_location(loc: &asg::Location) -> JsonLocation {
+    [JsonPosition::from(&loc[0]), JsonPosition::from(&loc[1])]
+}
 
 // --- Config ---
 
@@ -238,7 +436,8 @@ fn populate_asg_defaults(node: &mut Value) {
 
 fn run_block_fixture(fixture: &TckFixture) -> Result<(), String> {
     let document = parse_document(&fixture.input);
-    let mut actual = serde_json::to_value(&document).map_err(|e| e.to_string())?;
+    let json_doc = JsonDocument::from(&document);
+    let mut actual = serde_json::to_value(&json_doc).map_err(|e| e.to_string())?;
 
     let has_locations = actual.get("location").is_some();
     let mut expected = if has_locations {
@@ -265,7 +464,8 @@ fn run_block_fixture(fixture: &TckFixture) -> Result<(), String> {
 
 fn run_inline_fixture(fixture: &TckFixture) -> Result<(), String> {
     let inlines = parse_inline(&fixture.input);
-    let actual = serde_json::to_value(&inlines).map_err(|e| e.to_string())?;
+    let json_inlines: Vec<_> = inlines.iter().map(JsonInlineNode::from).collect();
+    let actual = serde_json::to_value(&json_inlines).map_err(|e| e.to_string())?;
 
     let has_locations = actual
         .as_array()
