@@ -57,9 +57,9 @@ fn discover_fixtures() -> Vec<TckFixture> {
 fn discover_recursive(dir: &Path, base: &Path, fixtures: &mut Vec<TckFixture>) {
     let mut entries: Vec<_> = fs::read_dir(dir)
         .unwrap_or_else(|e| panic!("failed to read TCK test directory {}: {e}", dir.display()))
-        .filter_map(|e| e.ok())
+        .filter_map(Result::ok)
         .collect();
-    entries.sort_by_key(|e| e.file_name());
+    entries.sort_by_key(fs::DirEntry::file_name);
 
     // Process files before directories (matches JS harness behavior)
     let (files, dirs): (Vec<_>, Vec<_>) = entries
@@ -172,9 +172,8 @@ fn strip_locations(value: &mut Value) {
 // --- ASG defaults population (replicates test-framework.js populateASGDefaults) ---
 
 fn populate_asg_defaults(node: &mut Value) {
-    let obj = match node.as_object_mut() {
-        Some(o) => o,
-        None => return,
+    let Some(obj) = node.as_object_mut() else {
+        return;
     };
 
     // Only process block nodes
@@ -251,7 +250,9 @@ fn run_block_fixture(fixture: &TckFixture) -> Result<(), String> {
     populate_asg_defaults(&mut actual);
     populate_asg_defaults(&mut expected);
 
-    if actual != expected {
+    if actual == expected {
+        Ok(())
+    } else {
         Err(format!(
             "[{}] {}\nExpected:\n{}\nActual:\n{}",
             fixture.relative_path,
@@ -259,8 +260,6 @@ fn run_block_fixture(fixture: &TckFixture) -> Result<(), String> {
             serde_json::to_string_pretty(&expected).unwrap(),
             serde_json::to_string_pretty(&actual).unwrap(),
         ))
-    } else {
-        Ok(())
     }
 }
 
@@ -279,7 +278,9 @@ fn run_inline_fixture(fixture: &TckFixture) -> Result<(), String> {
         &fixture.expected_without_locations
     };
 
-    if actual != *expected {
+    if actual == *expected {
+        Ok(())
+    } else {
         Err(format!(
             "[{}] {}\nExpected:\n{}\nActual:\n{}",
             fixture.relative_path,
@@ -287,8 +288,6 @@ fn run_inline_fixture(fixture: &TckFixture) -> Result<(), String> {
             serde_json::to_string_pretty(expected).unwrap(),
             serde_json::to_string_pretty(&actual).unwrap(),
         ))
-    } else {
-        Ok(())
     }
 }
 

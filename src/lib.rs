@@ -134,7 +134,8 @@ pub struct SpanNode<'a> {
     pub location: Option<Location>,
 }
 
-/// Parse an AsciiDoc document and return its ASG.
+/// Parse an `AsciiDoc` document and return its ASG.
+#[must_use]
 pub fn parse_document(_input: &str) -> Document<'_> {
     Document {
         name: "document",
@@ -146,7 +147,8 @@ pub fn parse_document(_input: &str) -> Document<'_> {
     }
 }
 
-/// Parse AsciiDoc inline content and return a list of inline nodes.
+/// Parse `AsciiDoc` inline content and return a list of inline nodes.
+#[must_use]
 pub fn parse_inline(_input: &str) -> Vec<InlineNode<'_>> {
     Vec::new()
 }
