@@ -3,6 +3,7 @@
 
 pub mod asg;
 mod lexer;
+mod parser;
 mod span;
 mod token;
 
@@ -10,19 +11,14 @@ use asg::{Document, InlineNode};
 
 /// Parse an `AsciiDoc` document and return its ASG.
 #[must_use]
-pub fn parse_document(_input: &str) -> Document<'_> {
-    Document {
-        attributes: None,
-        header: None,
-        blocks: Vec::new(),
-        location: None,
-    }
+pub fn parse_document(input: &str) -> Document<'_> {
+    parser::parse_doc(input)
 }
 
 /// Parse `AsciiDoc` inline content and return a list of inline nodes.
 #[must_use]
-pub fn parse_inline(_input: &str) -> Vec<InlineNode<'_>> {
-    Vec::new()
+pub fn parse_inline(input: &str) -> Vec<InlineNode<'_>> {
+    parser::parse_inlines(input)
 }
 
 #[cfg(test)]

@@ -165,9 +165,17 @@ impl SourceIndex {
     }
 
     /// Convert a [`SourceSpan`] to an ASG [`Location`].
+    ///
+    /// The end position is **inclusive** (points to the last byte of the span),
+    /// matching the convention used by the `AsciiDoc` TCK.
     #[must_use]
     pub fn location(&self, span: &SourceSpan) -> Location {
-        [self.position(span.start), self.position(span.end)]
+        let end = if span.end > span.start {
+            span.end - 1
+        } else {
+            span.start
+        };
+        [self.position(span.start), self.position(end)]
     }
 }
 
@@ -202,10 +210,12 @@ mod tests {
     fn span_to_location() {
         let src = "ab\ncd";
         let idx = SourceIndex::new(src);
+        // Span 0..4 covers bytes a(0) b(1) \n(2) c(3).
+        // Inclusive end is byte 3 → line 2, col 1.
         let span = SourceSpan { start: 0, end: 4 };
         let loc = idx.location(&span);
         assert_eq!(loc[0], Position { line: 1, col: 1 });
-        assert_eq!(loc[1], Position { line: 2, col: 2 });
+        assert_eq!(loc[1], Position { line: 2, col: 1 });
     }
 
     #[test]
