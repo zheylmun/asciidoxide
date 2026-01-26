@@ -6,6 +6,7 @@ version = 4
 name = "asciidoc"
 version = "0.1.0"
 dependencies = [
+ "asciidoc",
  "serde",
  "serde_json",
 ]
