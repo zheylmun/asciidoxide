@@ -18,12 +18,14 @@ const SPECIAL: &str = "=*_`#^~+-.:!/\\|,\"'<>[]{}";
 
 /// Lex an `AsciiDoc` source string into a sequence of tokens with spans.
 ///
-/// Returns a tuple of:
-/// - `Option<Vec<Spanned>>` — the token stream (present even on partial
-///   success thanks to error recovery)
-/// - `Vec<Rich<char>>` — any lexer errors encountered
-pub fn lex(input: &str) -> (Option<Vec<Spanned<'_>>>, Vec<Rich<'_, char>>) {
-    lexer().parse(input).into_output_errors()
+/// The lexer is infallible: every byte of input maps to a token, so this
+/// always returns a complete token stream.
+#[must_use]
+pub fn lex(input: &str) -> Vec<Spanned<'_>> {
+    lexer()
+        .parse(input)
+        .into_output()
+        .expect("infallible lexer produced no output")
 }
 
 /// Build the chumsky lexer parser.
@@ -96,16 +98,9 @@ fn lexer<'src>()
 mod tests {
     use super::*;
 
-    /// Helper: lex input and return the token list, panicking on failure.
-    fn lex_ok(input: &str) -> Vec<(Token<'_>, SourceSpan)> {
-        let (tokens, errors) = lex(input);
-        assert!(errors.is_empty(), "unexpected lex errors: {errors:?}");
-        tokens.expect("lexer produced no output")
-    }
-
     /// Helper: extract just the token variants (discard spans).
     fn tokens(input: &str) -> Vec<Token<'_>> {
-        lex_ok(input).into_iter().map(|(t, _)| t).collect()
+        lex(input).into_iter().map(|(t, _)| t).collect()
     }
 
     #[test]
@@ -237,7 +232,7 @@ mod tests {
 
     #[test]
     fn spans_are_correct() {
-        let toks = lex_ok("ab\n*");
+        let toks = lex("ab\n*");
         assert_eq!(
             toks[0],
             (Token::Text("ab"), SourceSpan { start: 0, end: 2 })
