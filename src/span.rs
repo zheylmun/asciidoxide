@@ -67,6 +67,15 @@ impl From<SourceSpan> for Range<usize> {
     }
 }
 
+impl From<chumsky::span::SimpleSpan> for SourceSpan {
+    fn from(span: chumsky::span::SimpleSpan) -> Self {
+        Self {
+            start: span.start,
+            end: span.end,
+        }
+    }
+}
+
 // -- chumsky::span::Span ----------------------------------------------------
 
 impl chumsky::span::Span for SourceSpan {

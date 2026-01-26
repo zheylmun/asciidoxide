@@ -2,6 +2,7 @@
 #![deny(missing_docs, unsafe_code)]
 
 pub mod asg;
+mod lexer;
 mod span;
 mod token;
 
