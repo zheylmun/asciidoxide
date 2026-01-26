@@ -4,7 +4,7 @@
 //! All context-sensitive disambiguation (e.g., `*` as bold vs. list marker)
 //! is deferred to the parser.
 
-use chumsky::prelude::*;
+use chumsky::{extra, prelude::*};
 
 use crate::span::SourceSpan;
 use crate::token::Token;
@@ -29,8 +29,7 @@ pub fn lex(input: &str) -> Vec<Spanned<'_>> {
 }
 
 /// Build the chumsky lexer parser.
-fn lexer<'src>()
--> impl Parser<'src, &'src str, Vec<(Token<'src>, SourceSpan)>, extra::Err<Rich<'src, char>>> {
+fn lexer<'src>() -> impl Parser<'src, &'src str, Vec<(Token<'src>, SourceSpan)>, extra::Default> {
     let newline = text::newline().to(Token::Newline);
 
     let whitespace = one_of(" \t").repeated().at_least(1).to(Token::Whitespace);
