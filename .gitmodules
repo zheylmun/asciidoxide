@@ -1,3 +1,6 @@
-[submodule "asciidoc-lang"]
-	path = asciidoc-lang
+[submodule "language_repositories/asciidoc_lang"]
+	path = language_repositories/asciidoc_lang
 	url = https://gitlab.eclipse.org/eclipse/asciidoc-lang/asciidoc-lang.git
+[submodule "language_repositories/asciidoc_tck"]
+	path = language_repositories/asciidoc_tck
+	url = https://gitlab.eclipse.org/eclipse/asciidoc-lang/asciidoc-tck.git
