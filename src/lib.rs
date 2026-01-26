@@ -2,6 +2,7 @@
 #![deny(missing_docs, unsafe_code)]
 
 pub mod asg;
+mod token;
 
 use asg::{Document, InlineNode};
 
