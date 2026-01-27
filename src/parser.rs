@@ -142,7 +142,19 @@ where
         })
     });
 
+    // Catch-all recovery: if all grammar branches fail on a token, consume
+    // it as a text node. This emits the original parse error as a diagnostic
+    // and lets `.repeated()` continue with the next token.
+    let catch_all = any().map_with(move |_tok, e| {
+        let span: SourceSpan = e.span();
+        InlineNode::Text(TextNode {
+            value: &source[span.start..span.end],
+            location: Some(idx.location(&span)),
+        })
+    });
+
     choice((single_inline, star_as_text))
+        .recover_with(via_parser(catch_all))
         .repeated()
         .at_least(1)
         .collect()
