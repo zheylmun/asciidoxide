@@ -154,10 +154,10 @@ fn run_inline_parser<'tokens, 'src: 'tokens>(
     source: &'src str,
     idx: &'tokens SourceIndex,
 ) -> (Vec<InlineNode<'src>>, Vec<ParseDiagnostic>) {
-    if tokens.is_empty() {
+    let Some(last) = tokens.last() else {
         return (Vec::new(), Vec::new());
-    }
-    let last_span = tokens.last().expect("non-empty").1;
+    };
+    let last_span = last.1;
     let eoi = SourceSpan {
         start: last_span.end,
         end: last_span.end,
@@ -344,11 +344,8 @@ fn make_paragraph<'src>(
 /// or `None` if the slice is empty.
 fn content_span(tokens: &[Spanned<'_>]) -> Option<SourceSpan> {
     let trimmed = strip_trailing_newlines(tokens);
-    if trimmed.is_empty() {
-        return None;
-    }
-    let start = trimmed.first().expect("non-empty").1.start;
-    let end = trimmed.last().expect("non-empty").1.end;
+    let start = trimmed.first()?.1.start;
+    let end = trimmed.last()?.1.end;
     Some(SourceSpan { start, end })
 }
 
