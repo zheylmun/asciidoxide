@@ -355,6 +355,14 @@ fn build_blocks<'src>(
             continue;
         }
 
+        // Try unordered list.
+        if let Some((block, next, diags)) = try_list(tokens, i, source, idx) {
+            blocks.push(block);
+            diagnostics.extend(diags);
+            i = next;
+            continue;
+        }
+
         // Collect paragraph tokens until a blank line or delimited block.
         let para_end = find_paragraph_end(tokens, i);
         if i < para_end {
@@ -388,8 +396,8 @@ fn find_paragraph_end(tokens: &[Spanned<'_>], start: usize) -> usize {
                 // Blank line — end paragraph before the newlines.
                 return nl_start;
             }
-            // After a single newline, check if the next line is a delimiter.
-            if is_listing_delimiter(tokens, i).is_some() {
+            // After a single newline, check if the next line starts a new block.
+            if is_listing_delimiter(tokens, i).is_some() || is_list_item(tokens, i) {
                 return nl_start;
             }
         } else {
@@ -521,6 +529,112 @@ fn try_listing<'src>(
             j += 1;
         }
     }
+}
+
+/// Check whether position `i` starts an unordered list item (`Star Whitespace`).
+fn is_list_item(tokens: &[Spanned<'_>], i: usize) -> bool {
+    i + 1 < tokens.len()
+        && matches!(tokens[i].0, Token::Star)
+        && matches!(tokens[i + 1].0, Token::Whitespace)
+}
+
+/// Try to parse an unordered list starting at position `i`.
+///
+/// Collects consecutive list items (each starting with `Star Whitespace`) into
+/// a single `list` block. Returns `None` if position `i` does not start a list
+/// item.
+fn try_list<'src>(
+    tokens: &[Spanned<'src>],
+    i: usize,
+    source: &'src str,
+    idx: &SourceIndex,
+) -> Option<(Block<'src>, usize, Vec<ParseDiagnostic>)> {
+    if !is_list_item(tokens, i) {
+        return None;
+    }
+
+    let mut items = Vec::new();
+    let mut diagnostics = Vec::new();
+    let mut j = i;
+    let list_span_start = tokens[i].1.start;
+    let mut list_span_end = tokens[i].1.end;
+
+    while is_list_item(tokens, j) {
+        let marker = &source[tokens[j].1.start..tokens[j].1.end];
+        let item_start = tokens[j].1.start;
+
+        // Content starts after Star Whitespace.
+        let content_start = j + 2;
+        let mut content_end = content_start;
+        while content_end < tokens.len() && !matches!(tokens[content_end].0, Token::Newline) {
+            content_end += 1;
+        }
+
+        // Parse principal content through the inline parser.
+        let content_tokens = &tokens[content_start..content_end];
+        let (principal, diags) = run_inline_parser(content_tokens, source, idx);
+        diagnostics.extend(diags);
+
+        // Item location: from the marker to the last content token.
+        let item_end = if content_end > content_start {
+            tokens[content_end - 1].1.end
+        } else {
+            tokens[j + 1].1.end
+        };
+        let item_span = SourceSpan {
+            start: item_start,
+            end: item_end,
+        };
+
+        items.push(Block {
+            name: "listItem",
+            form: None,
+            delimiter: None,
+            title: None,
+            level: None,
+            variant: None,
+            marker: Some(marker),
+            inlines: None,
+            blocks: None,
+            items: None,
+            principal: Some(principal),
+            location: Some(idx.location(&item_span)),
+        });
+
+        list_span_end = item_end;
+
+        // Advance past the Newline (if present).
+        j = if content_end < tokens.len() {
+            content_end + 1
+        } else {
+            content_end
+        };
+    }
+
+    let list_span = SourceSpan {
+        start: list_span_start,
+        end: list_span_end,
+    };
+    let marker = items[0].marker;
+
+    Some((
+        Block {
+            name: "list",
+            form: None,
+            delimiter: None,
+            title: None,
+            level: None,
+            variant: Some("unordered"),
+            marker,
+            inlines: None,
+            blocks: None,
+            items: Some(items),
+            principal: None,
+            location: Some(idx.location(&list_span)),
+        },
+        j,
+        diagnostics,
+    ))
 }
 
 /// Build a paragraph `Block` from its content tokens.
@@ -734,5 +848,35 @@ mod tests {
         let loc = block.location.as_ref().unwrap();
         assert_eq!(loc[0], Position { line: 1, col: 1 });
         assert_eq!(loc[1], Position { line: 5, col: 4 });
+    }
+
+    #[test]
+    fn doc_unordered_list_single_item() {
+        let (doc, diags) = parse_doc("* water");
+        assert!(diags.is_empty());
+        assert_eq!(doc.blocks.len(), 1);
+        let list = &doc.blocks[0];
+        assert_eq!(list.name, "list");
+        assert_eq!(list.variant, Some("unordered"));
+        assert_eq!(list.marker, Some("*"));
+        let items = list.items.as_ref().unwrap();
+        assert_eq!(items.len(), 1);
+        let item = &items[0];
+        assert_eq!(item.name, "listItem");
+        assert_eq!(item.marker, Some("*"));
+        let principal = item.principal.as_ref().unwrap();
+        assert_eq!(principal.len(), 1);
+        match &principal[0] {
+            InlineNode::Text(t) => {
+                assert_eq!(t.value, "water");
+                let loc = t.location.as_ref().unwrap();
+                assert_eq!(loc[0], Position { line: 1, col: 3 });
+                assert_eq!(loc[1], Position { line: 1, col: 7 });
+            }
+            InlineNode::Span(_) => panic!("expected Text node"),
+        }
+        let loc = list.location.as_ref().unwrap();
+        assert_eq!(loc[0], Position { line: 1, col: 1 });
+        assert_eq!(loc[1], Position { line: 1, col: 7 });
     }
 }
