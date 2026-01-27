@@ -18,6 +18,17 @@ use crate::token::Token;
 /// conflict with [`chumsky::span::Spanned`]).
 type Spanned<'a> = (Token<'a>, SourceSpan);
 
+/// Result of header extraction from the token stream.
+struct HeaderResult<'src> {
+    header: Option<Header<'src>>,
+    /// Index of the first body token (past the header and its attributes).
+    body_start: usize,
+    diagnostics: Vec<ParseDiagnostic>,
+    /// Document attributes parsed from `:key: value` lines below the title.
+    /// `Some` when a header is present (even if no attribute entries exist).
+    attributes: Option<HashMap<&'src str, &'src str>>,
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -40,7 +51,12 @@ pub fn parse_doc(input: &str) -> (Document<'_>, Vec<ParseDiagnostic>) {
         );
     }
 
-    let (header, body_start, mut diagnostics) = extract_header(&tokens, input, &idx);
+    let HeaderResult {
+        header,
+        body_start,
+        mut diagnostics,
+        attributes,
+    } = extract_header(&tokens, input, &idx);
     let body_tokens = &tokens[body_start..];
     let (blocks, block_diags) = build_blocks(body_tokens, input, &idx);
     diagnostics.extend(block_diags);
@@ -51,11 +67,7 @@ pub fn parse_doc(input: &str) -> (Document<'_>, Vec<ParseDiagnostic>) {
 
     (
         Document {
-            attributes: if header.is_some() {
-                Some(HashMap::new())
-            } else {
-                None
-            },
+            attributes,
             header,
             blocks,
             location,
@@ -197,19 +209,20 @@ fn run_inline_parser<'tokens, 'src: 'tokens>(
 
 /// Detect a document header (`= Title`) at the start of the token stream.
 ///
-/// Returns `(Some(header), first_body_token_index, diagnostics)` when a header
-/// is found, or `(None, 0, diagnostics)` otherwise.
+/// When a header is found, `attributes` is `Some(map)` (possibly empty).
+/// Attribute entry lines (`:key: value`) immediately following the title are
+/// parsed into the map.
 fn extract_header<'src>(
     tokens: &[Spanned<'src>],
     source: &'src str,
     idx: &SourceIndex,
-) -> (Option<Header<'src>>, usize, Vec<ParseDiagnostic>) {
+) -> HeaderResult<'src> {
     // Header requires at least: Eq Whitespace <content>
     if tokens.len() >= 3
         && matches!(tokens[0].0, Token::Eq)
         && matches!(tokens[1].0, Token::Whitespace)
     {
-        // Find the Newline (or end-of-tokens) that terminates the header line.
+        // Find the Newline (or end-of-tokens) that terminates the title line.
         let title_start = 2;
         let mut title_end = title_start;
         while title_end < tokens.len() && !matches!(tokens[title_end].0, Token::Newline) {
@@ -221,10 +234,73 @@ fn extract_header<'src>(
             let (title_inlines, diagnostics) = run_inline_parser(title_tokens, source, idx);
 
             let header_start = tokens[0].1.start;
-            let header_end = tokens[title_end - 1].1.end;
+            let mut span_end = tokens[title_end - 1].1.end;
+
+            // Advance past the title's terminating Newline (if present).
+            let mut i = if title_end < tokens.len() {
+                title_end + 1
+            } else {
+                title_end
+            };
+
+            // Parse attribute entry lines: `:key: value` or `:key:`
+            let mut attributes = HashMap::new();
+            while i + 2 < tokens.len()
+                && matches!(tokens[i].0, Token::Colon)
+                && matches!(tokens[i + 1].0, Token::Text(_))
+                && matches!(tokens[i + 2].0, Token::Colon)
+            {
+                let key = match &tokens[i + 1].0 {
+                    Token::Text(s) => *s,
+                    _ => unreachable!(),
+                };
+
+                // Skip optional whitespace after second colon.
+                let mut val_start = i + 3;
+                if val_start < tokens.len()
+                    && matches!(tokens[val_start].0, Token::Whitespace)
+                {
+                    val_start += 1;
+                }
+
+                // Scan to Newline or end-of-tokens.
+                let mut line_end = val_start;
+                while line_end < tokens.len()
+                    && !matches!(tokens[line_end].0, Token::Newline)
+                {
+                    line_end += 1;
+                }
+
+                // Extract value via source slicing (zero-copy).
+                let value = if val_start < line_end {
+                    let start = tokens[val_start].1.start;
+                    let end = tokens[line_end - 1].1.end;
+                    &source[start..end]
+                } else {
+                    ""
+                };
+
+                attributes.insert(key, value);
+
+                // Update header span end to last content token on this line.
+                let last_content = if line_end > val_start {
+                    line_end - 1
+                } else {
+                    i + 2
+                };
+                span_end = tokens[last_content].1.end;
+
+                // Advance past Newline (if present).
+                i = if line_end < tokens.len() {
+                    line_end + 1
+                } else {
+                    line_end
+                };
+            }
+
             let header_span = SourceSpan {
                 start: header_start,
-                end: header_end,
+                end: span_end,
             };
 
             let header = Header {
@@ -232,18 +308,21 @@ fn extract_header<'src>(
                 location: Some(idx.location(&header_span)),
             };
 
-            // Advance past the terminating Newline (if present).
-            let next = if title_end < tokens.len() {
-                title_end + 1
-            } else {
-                title_end
+            return HeaderResult {
+                header: Some(header),
+                body_start: i,
+                diagnostics,
+                attributes: Some(attributes),
             };
-
-            return (Some(header), next, diagnostics);
         }
     }
 
-    (None, 0, Vec::new())
+    HeaderResult {
+        header: None,
+        body_start: 0,
+        diagnostics: Vec::new(),
+        attributes: None,
+    }
 }
 
 /// Build block-level ASG nodes from a body token stream.
