@@ -355,6 +355,14 @@ fn build_blocks<'src>(
             continue;
         }
 
+        // Try delimited sidebar block.
+        if let Some((block, next, diags)) = try_sidebar(tokens, i, source, idx) {
+            blocks.push(block);
+            diagnostics.extend(diags);
+            i = next;
+            continue;
+        }
+
         // Try section heading.
         if let Some((block, next, diags)) = try_section(tokens, i, source, idx) {
             blocks.push(block);
@@ -406,6 +414,7 @@ fn find_paragraph_end(tokens: &[Spanned<'_>], start: usize) -> usize {
             }
             // After a single newline, check if the next line starts a new block.
             if is_listing_delimiter(tokens, i).is_some()
+                || is_sidebar_delimiter(tokens, i).is_some()
                 || is_list_item(tokens, i)
                 || is_section_heading(tokens, i).is_some()
             {
@@ -530,6 +539,116 @@ fn try_listing<'src>(
                 };
 
                 return Some((block, after_close));
+            }
+        }
+        // Advance to the next line.
+        while j < tokens.len() && !matches!(tokens[j].0, Token::Newline) {
+            j += 1;
+        }
+        if j < tokens.len() {
+            j += 1;
+        }
+    }
+}
+
+/// Check whether position `i` starts a sidebar delimiter line.
+///
+/// A sidebar delimiter is 4 or more consecutive `Star` tokens with nothing
+/// else on the line (followed by `Newline` or end-of-tokens). Returns the
+/// index past the delimiter (past the `Newline` if present).
+fn is_sidebar_delimiter(tokens: &[Spanned<'_>], i: usize) -> Option<usize> {
+    if i + 3 >= tokens.len() {
+        return None;
+    }
+    let mut j = i;
+    while j < tokens.len() && matches!(tokens[j].0, Token::Star) {
+        j += 1;
+    }
+    if j - i < 4 {
+        return None;
+    }
+    // Must be followed by Newline or be at end-of-tokens.
+    if j < tokens.len() && !matches!(tokens[j].0, Token::Newline) {
+        return None;
+    }
+    if j < tokens.len() {
+        j += 1;
+    }
+    Some(j)
+}
+
+/// Try to parse a delimited sidebar block starting at position `i`.
+///
+/// A sidebar uses `****` delimiters and has a compound content model — its
+/// content is recursively parsed through [`build_blocks`]. Returns `None` if
+/// no complete sidebar (opening **and** matching closing delimiter) is found.
+fn try_sidebar<'src>(
+    tokens: &[Spanned<'src>],
+    i: usize,
+    source: &'src str,
+    idx: &SourceIndex,
+) -> Option<(Block<'src>, usize, Vec<ParseDiagnostic>)> {
+    let content_start = is_sidebar_delimiter(tokens, i)?;
+
+    // Count opening stars to match against the closing delimiter.
+    let mut delim_end_tok = i;
+    while delim_end_tok < tokens.len() && matches!(tokens[delim_end_tok].0, Token::Star) {
+        delim_end_tok += 1;
+    }
+    let open_star_count = delim_end_tok - i;
+    let delimiter = &source[tokens[i].1.start..tokens[delim_end_tok - 1].1.end];
+
+    // Scan line-by-line for a matching closing delimiter.
+    let mut j = content_start;
+    loop {
+        if j >= tokens.len() {
+            return None;
+        }
+        if let Some(after_close) = is_sidebar_delimiter(tokens, j) {
+            let mut k = j;
+            while k < tokens.len() && matches!(tokens[k].0, Token::Star) {
+                k += 1;
+            }
+            if k - j == open_star_count {
+                // Matching closing delimiter found.
+
+                // Content tokens: exclude the Newline before the closing delimiter.
+                let content_end = if j > content_start
+                    && matches!(tokens[j - 1].0, Token::Newline)
+                {
+                    j - 1
+                } else {
+                    j
+                };
+
+                // Recursively parse content as blocks.
+                let content_tokens = &tokens[content_start..content_end];
+                let (body_blocks, body_diags) = build_blocks(content_tokens, source, idx);
+
+                // Block location: opening delimiter through closing delimiter.
+                let block_span = SourceSpan {
+                    start: tokens[i].1.start,
+                    end: tokens[k - 1].1.end,
+                };
+
+                return Some((
+                    Block {
+                        name: "sidebar",
+                        form: Some("delimited"),
+                        delimiter: Some(delimiter),
+                        title: None,
+                        level: None,
+                        variant: None,
+                        marker: None,
+                        inlines: None,
+                        blocks: Some(body_blocks),
+                        items: None,
+                        principal: None,
+                        location: Some(idx.location(&block_span)),
+                    },
+                    after_close,
+                    body_diags,
+                ));
             }
         }
         // Advance to the next line.
@@ -1002,5 +1121,27 @@ mod tests {
         let loc = section.location.as_ref().unwrap();
         assert_eq!(loc[0], Position { line: 1, col: 1 });
         assert_eq!(loc[1], Position { line: 3, col: 9 });
+    }
+
+    #[test]
+    fn doc_sidebar_with_list() {
+        let (doc, diags) = parse_doc("****\n* phone\n* wallet\n* keys\n****");
+        assert!(diags.is_empty());
+        assert_eq!(doc.blocks.len(), 1);
+        let sidebar = &doc.blocks[0];
+        assert_eq!(sidebar.name, "sidebar");
+        assert_eq!(sidebar.form, Some("delimited"));
+        assert_eq!(sidebar.delimiter, Some("****"));
+        let blocks = sidebar.blocks.as_ref().unwrap();
+        assert_eq!(blocks.len(), 1);
+        let list = &blocks[0];
+        assert_eq!(list.name, "list");
+        assert_eq!(list.variant, Some("unordered"));
+        let items = list.items.as_ref().unwrap();
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0].principal.as_ref().unwrap().len(), 1);
+        let loc = sidebar.location.as_ref().unwrap();
+        assert_eq!(loc[0], Position { line: 1, col: 1 });
+        assert_eq!(loc[1], Position { line: 5, col: 4 });
     }
 }
