@@ -327,73 +327,200 @@ fn extract_header<'src>(
 
 /// Build block-level ASG nodes from a body token stream.
 ///
-/// For the first pass this only produces paragraph blocks, split at blank
-/// lines (two or more consecutive `Newline` tokens).
+/// Scans tokens linearly, detecting delimited blocks (e.g., listing) before
+/// falling back to paragraph collection. Blocks are separated by blank lines
+/// (two or more consecutive `Newline` tokens).
 fn build_blocks<'src>(
     tokens: &[Spanned<'src>],
     source: &'src str,
     idx: &SourceIndex,
 ) -> (Vec<Block<'src>>, Vec<ParseDiagnostic>) {
-    let groups = split_paragraphs(tokens);
-    let mut blocks = Vec::with_capacity(groups.len());
+    let mut blocks = Vec::new();
     let mut diagnostics = Vec::new();
-    for para_tokens in groups {
-        let (block, diags) = make_paragraph(para_tokens, source, idx);
-        blocks.push(block);
-        diagnostics.extend(diags);
+    let mut i = 0;
+
+    while i < tokens.len() {
+        // Skip inter-block newlines.
+        while i < tokens.len() && matches!(tokens[i].0, Token::Newline) {
+            i += 1;
+        }
+        if i >= tokens.len() {
+            break;
+        }
+
+        // Try delimited listing block.
+        if let Some((block, next)) = try_listing(tokens, i, source, idx) {
+            blocks.push(block);
+            i = next;
+            continue;
+        }
+
+        // Collect paragraph tokens until a blank line or delimited block.
+        let para_end = find_paragraph_end(tokens, i);
+        if i < para_end {
+            let (block, diags) = make_paragraph(&tokens[i..para_end], source, idx);
+            blocks.push(block);
+            diagnostics.extend(diags);
+        }
+        i = para_end;
     }
+
     (blocks, diagnostics)
 }
 
-/// Split a token stream into paragraph groups at blank lines.
+/// Find the end of a paragraph starting at `start`.
 ///
-/// A blank line is two or more consecutive `Newline` tokens. Each returned
-/// slice contains the content tokens of one paragraph (no leading/trailing
-/// newlines).
-fn split_paragraphs<'a, 'src>(tokens: &'a [Spanned<'src>]) -> Vec<&'a [Spanned<'src>]> {
-    let mut paragraphs = Vec::new();
-    let mut i = 0;
-
-    // Skip leading newlines.
-    while i < tokens.len() && matches!(tokens[i].0, Token::Newline) {
-        i += 1;
-    }
-
-    let mut para_start = i;
-
+/// Stops at a blank line (2+ consecutive `Newline` tokens), at a line that
+/// starts a listing delimiter, or at the end of the token stream. Returns
+/// the index of the first token past the paragraph content (trailing
+/// newlines are excluded from the paragraph).
+fn find_paragraph_end(tokens: &[Spanned<'_>], start: usize) -> usize {
+    let mut i = start;
     while i < tokens.len() {
         if matches!(tokens[i].0, Token::Newline) {
-            let newline_start = i;
-
-            // Count consecutive newlines.
-            let mut newline_count = 0;
+            let nl_start = i;
+            let mut nl_count = 0;
             while i < tokens.len() && matches!(tokens[i].0, Token::Newline) {
-                newline_count += 1;
+                nl_count += 1;
                 i += 1;
             }
-
-            if newline_count >= 2 {
-                // Blank line boundary — close the current paragraph.
-                if para_start < newline_start {
-                    paragraphs.push(&tokens[para_start..newline_start]);
-                }
-                para_start = i;
+            if nl_count >= 2 {
+                // Blank line — end paragraph before the newlines.
+                return nl_start;
             }
-            // A single newline is part of the paragraph (multi-line para).
+            // After a single newline, check if the next line is a delimiter.
+            if is_listing_delimiter(tokens, i).is_some() {
+                return nl_start;
+            }
         } else {
             i += 1;
         }
     }
+    // Reached end of tokens — strip trailing newlines.
+    strip_trailing_newline_index(tokens, start)
+}
 
-    // Trailing paragraph (may end without a blank line).
-    if para_start < tokens.len() {
-        let end = strip_trailing_newline_index(tokens, para_start);
-        if para_start < end {
-            paragraphs.push(&tokens[para_start..end]);
+/// Check whether position `i` starts a listing delimiter line.
+///
+/// A listing delimiter is 4 or more consecutive `Hyphen` tokens with nothing
+/// else on the line (followed by `Newline` or end-of-tokens). Returns the
+/// index past the delimiter (past the `Newline` if present).
+fn is_listing_delimiter(tokens: &[Spanned<'_>], i: usize) -> Option<usize> {
+    if i + 3 >= tokens.len() {
+        return None;
+    }
+    let mut j = i;
+    while j < tokens.len() && matches!(tokens[j].0, Token::Hyphen) {
+        j += 1;
+    }
+    if j - i < 4 {
+        return None;
+    }
+    // Must be followed by Newline or be at end-of-tokens.
+    if j < tokens.len() && !matches!(tokens[j].0, Token::Newline) {
+        return None;
+    }
+    if j < tokens.len() {
+        j += 1;
+    }
+    Some(j)
+}
+
+/// Try to parse a delimited listing block starting at position `i`.
+///
+/// Returns `Some((block, next_index))` if a complete listing block (opening
+/// **and** matching closing delimiter) is found, or `None` otherwise.
+fn try_listing<'src>(
+    tokens: &[Spanned<'src>],
+    i: usize,
+    source: &'src str,
+    idx: &SourceIndex,
+) -> Option<(Block<'src>, usize)> {
+    let content_start = is_listing_delimiter(tokens, i)?;
+
+    // Count opening hyphens to match against the closing delimiter.
+    let mut delim_end_tok = i;
+    while delim_end_tok < tokens.len() && matches!(tokens[delim_end_tok].0, Token::Hyphen) {
+        delim_end_tok += 1;
+    }
+    let open_hyphen_count = delim_end_tok - i;
+    let delimiter = &source[tokens[i].1.start..tokens[delim_end_tok - 1].1.end];
+
+    // Scan line-by-line for a matching closing delimiter.
+    let mut j = content_start;
+    loop {
+        if j >= tokens.len() {
+            // No closing delimiter found.
+            return None;
+        }
+        // Check for closing delimiter at start of this line.
+        if let Some(after_close) = is_listing_delimiter(tokens, j) {
+            let mut k = j;
+            while k < tokens.len() && matches!(tokens[k].0, Token::Hyphen) {
+                k += 1;
+            }
+            if k - j == open_hyphen_count {
+                // Matching closing delimiter found.
+
+                // Content tokens are content_start..before the Newline preceding
+                // the closing delimiter.
+                let content_end = if j > content_start
+                    && matches!(tokens[j - 1].0, Token::Newline)
+                {
+                    j - 1
+                } else {
+                    j
+                };
+
+                let (value, content_location) = if content_start < content_end {
+                    let start_byte = tokens[content_start].1.start;
+                    let end_byte = tokens[content_end - 1].1.end;
+                    let span = SourceSpan {
+                        start: start_byte,
+                        end: end_byte,
+                    };
+                    (&source[start_byte..end_byte], Some(idx.location(&span)))
+                } else {
+                    ("", None)
+                };
+
+                // Block location: opening delimiter through closing delimiter.
+                let block_span = SourceSpan {
+                    start: tokens[i].1.start,
+                    end: tokens[k - 1].1.end,
+                };
+
+                let text_node = InlineNode::Text(TextNode {
+                    value,
+                    location: content_location,
+                });
+
+                let block = Block {
+                    name: "listing",
+                    form: Some("delimited"),
+                    delimiter: Some(delimiter),
+                    title: None,
+                    level: None,
+                    variant: None,
+                    marker: None,
+                    inlines: Some(vec![text_node]),
+                    blocks: None,
+                    items: None,
+                    principal: None,
+                    location: Some(idx.location(&block_span)),
+                };
+
+                return Some((block, after_close));
+            }
+        }
+        // Advance to the next line.
+        while j < tokens.len() && !matches!(tokens[j].0, Token::Newline) {
+            j += 1;
+        }
+        if j < tokens.len() {
+            j += 1;
         }
     }
-
-    paragraphs
 }
 
 /// Build a paragraph `Block` from its content tokens.
@@ -582,5 +709,30 @@ mod tests {
         let (doc, diags) = parse_doc("a\n\n\nb");
         assert!(diags.is_empty());
         assert_eq!(doc.blocks.len(), 2);
+    }
+
+    #[test]
+    fn doc_listing_block() {
+        let (doc, diags) = parse_doc("----\ndef main\n  puts 'hello'\nend\n----");
+        assert!(diags.is_empty());
+        assert_eq!(doc.blocks.len(), 1);
+        let block = &doc.blocks[0];
+        assert_eq!(block.name, "listing");
+        assert_eq!(block.form, Some("delimited"));
+        assert_eq!(block.delimiter, Some("----"));
+        let inlines = block.inlines.as_ref().unwrap();
+        assert_eq!(inlines.len(), 1);
+        match &inlines[0] {
+            InlineNode::Text(t) => {
+                assert_eq!(t.value, "def main\n  puts 'hello'\nend");
+                let loc = t.location.as_ref().unwrap();
+                assert_eq!(loc[0], Position { line: 2, col: 1 });
+                assert_eq!(loc[1], Position { line: 4, col: 3 });
+            }
+            InlineNode::Span(_) => panic!("expected Text node"),
+        }
+        let loc = block.location.as_ref().unwrap();
+        assert_eq!(loc[0], Position { line: 1, col: 1 });
+        assert_eq!(loc[1], Position { line: 5, col: 4 });
     }
 }
