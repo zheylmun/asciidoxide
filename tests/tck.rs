@@ -437,7 +437,6 @@ fn populate_asg_defaults(node: &mut Value) {
 /// Test fixtures that exercise features the parser does not yet support.
 /// Remove entries from this list as the parser gains capabilities.
 const UNSUPPORTED: &[&str] = &[
-    "block/section/title-body",
     "block/sidebar/containing-unordered-list",
 ];
 

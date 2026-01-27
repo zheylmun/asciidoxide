@@ -355,6 +355,14 @@ fn build_blocks<'src>(
             continue;
         }
 
+        // Try section heading.
+        if let Some((block, next, diags)) = try_section(tokens, i, source, idx) {
+            blocks.push(block);
+            diagnostics.extend(diags);
+            i = next;
+            continue;
+        }
+
         // Try unordered list.
         if let Some((block, next, diags)) = try_list(tokens, i, source, idx) {
             blocks.push(block);
@@ -397,7 +405,10 @@ fn find_paragraph_end(tokens: &[Spanned<'_>], start: usize) -> usize {
                 return nl_start;
             }
             // After a single newline, check if the next line starts a new block.
-            if is_listing_delimiter(tokens, i).is_some() || is_list_item(tokens, i) {
+            if is_listing_delimiter(tokens, i).is_some()
+                || is_list_item(tokens, i)
+                || is_section_heading(tokens, i).is_some()
+            {
                 return nl_start;
             }
         } else {
@@ -529,6 +540,92 @@ fn try_listing<'src>(
             j += 1;
         }
     }
+}
+
+/// Check whether position `i` starts a section heading (2+ `Eq` followed by
+/// `Whitespace`). Returns `(level, title_start_index)` where level is the
+/// number of `Eq` tokens minus one.
+fn is_section_heading(tokens: &[Spanned<'_>], i: usize) -> Option<(usize, usize)> {
+    let mut j = i;
+    while j < tokens.len() && matches!(tokens[j].0, Token::Eq) {
+        j += 1;
+    }
+    let eq_count = j - i;
+    if eq_count < 2 {
+        return None;
+    }
+    if j >= tokens.len() || !matches!(tokens[j].0, Token::Whitespace) {
+        return None;
+    }
+    Some((eq_count - 1, j + 1))
+}
+
+/// Try to parse a section starting at position `i`.
+///
+/// A section heading is 2+ `Eq` tokens followed by `Whitespace` and a title.
+/// The section's body is all subsequent content (processed recursively through
+/// [`build_blocks`]).
+fn try_section<'src>(
+    tokens: &[Spanned<'src>],
+    i: usize,
+    source: &'src str,
+    idx: &SourceIndex,
+) -> Option<(Block<'src>, usize, Vec<ParseDiagnostic>)> {
+    let (level, title_start) = is_section_heading(tokens, i)?;
+
+    // Find end of title line.
+    let mut title_end = title_start;
+    while title_end < tokens.len() && !matches!(tokens[title_end].0, Token::Newline) {
+        title_end += 1;
+    }
+
+    if title_start >= title_end {
+        return None;
+    }
+
+    // Parse title through inline parser.
+    let title_tokens = &tokens[title_start..title_end];
+    let (title_inlines, mut diagnostics) = run_inline_parser(title_tokens, source, idx);
+
+    // Body starts after the title's Newline.
+    let body_start = if title_end < tokens.len() {
+        title_end + 1
+    } else {
+        title_end
+    };
+
+    // The section consumes all remaining tokens.
+    // TODO: Handle section nesting (stop at a heading of equal or higher level).
+    let section_end = tokens.len();
+
+    // Build body blocks.
+    let body_tokens = &tokens[body_start..section_end];
+    let (body_blocks, body_diags) = build_blocks(body_tokens, source, idx);
+    diagnostics.extend(body_diags);
+
+    // Section location: from first Eq to last content token.
+    let section_tokens = &tokens[i..section_end];
+    let section_span = content_span(section_tokens);
+    let section_location = section_span.map(|s| idx.location(&s));
+
+    Some((
+        Block {
+            name: "section",
+            form: None,
+            delimiter: None,
+            title: Some(title_inlines),
+            level: Some(level),
+            variant: None,
+            marker: None,
+            inlines: None,
+            blocks: Some(body_blocks),
+            items: None,
+            principal: None,
+            location: section_location,
+        },
+        section_end,
+        diagnostics,
+    ))
 }
 
 /// Check whether position `i` starts an unordered list item (`Star Whitespace`).
@@ -878,5 +975,32 @@ mod tests {
         let loc = list.location.as_ref().unwrap();
         assert_eq!(loc[0], Position { line: 1, col: 1 });
         assert_eq!(loc[1], Position { line: 1, col: 7 });
+    }
+
+    #[test]
+    fn doc_section_with_body() {
+        let (doc, diags) = parse_doc("== Section Title\n\nparagraph");
+        assert!(diags.is_empty());
+        assert_eq!(doc.blocks.len(), 1);
+        let section = &doc.blocks[0];
+        assert_eq!(section.name, "section");
+        assert_eq!(section.level, Some(1));
+        let title = section.title.as_ref().unwrap();
+        assert_eq!(title.len(), 1);
+        match &title[0] {
+            InlineNode::Text(t) => {
+                assert_eq!(t.value, "Section Title");
+                let loc = t.location.as_ref().unwrap();
+                assert_eq!(loc[0], Position { line: 1, col: 4 });
+                assert_eq!(loc[1], Position { line: 1, col: 16 });
+            }
+            InlineNode::Span(_) => panic!("expected Text node"),
+        }
+        let blocks = section.blocks.as_ref().unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].name, "paragraph");
+        let loc = section.location.as_ref().unwrap();
+        assert_eq!(loc[0], Position { line: 1, col: 1 });
+        assert_eq!(loc[1], Position { line: 3, col: 9 });
     }
 }
