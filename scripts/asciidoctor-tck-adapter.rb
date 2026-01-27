@@ -28,11 +28,18 @@ MARKER_CLOSE = "\x02"
 module Asciidoctor
   module Substitutors
     def convert_quoted_text match, type, scope
-      if scope == :constrained
-        if (is_unescaped = match[0].start_with?(RS))
-          unescaped_attrs = %([#{match[2]}])
+      # Handle escaped delimiters: return literal text (strip the backslash).
+      # Mirrors the original Asciidoctor logic that our monkey-patch must preserve.
+      if match[0].start_with?(RS)
+        if scope == :constrained && (attrs = match[2])
+          unescaped_attrs = %([#{attrs}])
+        else
+          return match[0].slice(1, match[0].length)
         end
-        if is_unescaped
+      end
+
+      if scope == :constrained
+        if unescaped_attrs
           %(#{unescaped_attrs}#{Inline.new(self, :quoted, match[3], type: type, attributes: { 'form' => 'constrained' }).convert})
         else
           if (attrlist = match[2])
@@ -118,7 +125,20 @@ class AsgConverter < Asciidoctor::Converter::Base
     "#{MARKER_OPEN}OPEN:#{variant}:#{form}#{MARKER_CLOSE}#{node.text}#{MARKER_OPEN}CLOSE#{MARKER_CLOSE}"
   end
 
-  def inline_anchor(node);   node.text || node.target || '' end
+  def inline_anchor(node)
+    case node.type
+    when :link
+      target = node.target || ''
+      text = node.text || ''
+      "#{MARKER_OPEN}REF:link|#{target}#{MARKER_CLOSE}#{text}#{MARKER_OPEN}CLOSE#{MARKER_CLOSE}"
+    when :xref
+      target = node.attributes['refid'] || node.target || ''
+      text = node.text || ''
+      "#{MARKER_OPEN}REF:xref|#{target}#{MARKER_CLOSE}#{text}#{MARKER_OPEN}CLOSE#{MARKER_CLOSE}"
+    else
+      node.text || node.target || ''
+    end
+  end
   def inline_break(node);    node.text || '' end
   def inline_button(node);   node.text || '' end
   def inline_callout(node);  node.text || '' end
@@ -133,12 +153,14 @@ end
 # Parse sentinel-annotated text into an array of ASG inline nodes
 # ---------------------------------------------------------------------------
 OPEN_RE = /\A#{Regexp.escape(MARKER_OPEN)}OPEN:([^:]+):([^#{Regexp.escape(MARKER_CLOSE)}]+)#{Regexp.escape(MARKER_CLOSE)}/
+REF_RE  = /\A#{Regexp.escape(MARKER_OPEN)}REF:([^|]+)\|([^#{Regexp.escape(MARKER_CLOSE)}]*)#{Regexp.escape(MARKER_CLOSE)}/
 CLOSE_TOKEN = "#{MARKER_OPEN}CLOSE#{MARKER_CLOSE}"
 
 def extract_inlines(text)
   return [] if text.nil? || text.empty?
 
-  # Stack: each entry is [span_info_or_nil, children_array]
+  # Stack: each entry is [node_info_or_nil, children_array]
+  # node_info has 'node_type' => 'span'|'ref' plus type-specific fields
   stack = [[nil, []]]
   buf = String.new
   i = 0
@@ -146,23 +168,38 @@ def extract_inlines(text)
   while i < text.length
     if text[i] == MARKER_OPEN
       rest = text[i..]
-      if (m = rest.match(OPEN_RE))
+      if (m = rest.match(REF_RE))
         flush_text(stack, buf)
         buf = String.new
-        stack << [{ 'variant' => m[1], 'form' => m[2] }, []]
+        stack << [{ 'node_type' => 'ref', 'variant' => m[1], 'target' => m[2] }, []]
+        i += m[0].length
+      elsif (m = rest.match(OPEN_RE))
+        flush_text(stack, buf)
+        buf = String.new
+        stack << [{ 'node_type' => 'span', 'variant' => m[1], 'form' => m[2] }, []]
         i += m[0].length
       elsif rest.start_with?(CLOSE_TOKEN)
         flush_text(stack, buf)
         buf = String.new
-        span_info, children = stack.pop
-        span = {
-          'name'    => 'span',
-          'type'    => 'inline',
-          'variant' => span_info['variant'],
-          'form'    => span_info['form'],
-          'inlines' => children,
-        }
-        stack.last[1] << span
+        info, children = stack.pop
+        if info['node_type'] == 'ref'
+          node = {
+            'name'    => 'ref',
+            'type'    => 'inline',
+            'variant' => info['variant'],
+            'target'  => info['target'],
+            'inlines' => children,
+          }
+        else
+          node = {
+            'name'    => 'span',
+            'type'    => 'inline',
+            'variant' => info['variant'],
+            'form'    => info['form'],
+            'inlines' => children,
+          }
+        end
+        stack.last[1] << node
         i += CLOSE_TOKEN.length
       else
         buf << text[i]

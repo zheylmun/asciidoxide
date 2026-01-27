@@ -437,13 +437,22 @@ fn populate_asg_defaults(node: &mut Value) {
 /// Test fixtures that exercise features the parser does not yet support.
 /// Remove entries from this list as the parser gains capabilities.
 const UNSUPPORTED: &[&str] = &[
+    "inline/ref/",
     "inline/span/code/",
     "inline/span/emphasis/",
     "inline/span/mark/",
+    "inline/span/strong/accented-word-boundary",
     "inline/span/strong/constrained-in-sentence",
     "inline/span/strong/constrained-multi-word",
+    "inline/span/strong/containing-code",
     "inline/span/strong/containing-emphasis",
+    "inline/span/strong/containing-link",
+    "inline/span/strong/containing-mark",
+    "inline/span/strong/sibling-with-code",
+    "inline/span/strong/sibling-with-emphasis",
+    "inline/span/strong/triple-nested",
     "inline/span/strong/unconstrained",
+    "inline/span/strong/unicode-content",
 ];
 
 fn is_unsupported(path: &str) -> bool {

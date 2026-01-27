@@ -106,19 +106,39 @@ fn inline_parser<'tokens, 'src: 'tokens, I>(
 where
     I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
 {
-    // The recursive parser handles a single inline node (strong span or text
-    // run). It does NOT include `star_as_text`, so a `Star` token inside a
-    // delimited span remains available for the closing delimiter.
+    // The recursive parser handles a single inline node (strong span, escaped
+    // delimiter, text run, or literal backslash). It does NOT include
+    // `star_as_text`, so a `Star` token inside a delimited span remains
+    // available for the closing delimiter.
     let single_inline = recursive(|single_inline| {
-        // A text run: one or more tokens that are not `Star`.
+        // A text run: one or more tokens that are not `Star` or `Backslash`.
+        // Backslash is excluded so the `escaped` combinator gets priority.
         let text_run = any()
-            .filter(|t: &Token| !matches!(t, Token::Star))
+            .filter(|t: &Token| !matches!(t, Token::Star | Token::Backslash))
             .repeated()
             .at_least(1)
             .map_with(move |_toks, e| {
                 let span: SourceSpan = e.span();
                 InlineNode::Text(TextNode {
                     value: &source[span.start..span.end],
+                    location: Some(idx.location(&span)),
+                })
+            });
+
+        // Escaped span delimiter: \* \_ \` \# → literal delimiter text.
+        // The backslash is consumed; the value starts after it.
+        let span_delim = choice((
+            just(Token::Star),
+            just(Token::Underscore),
+            just(Token::Backtick),
+            just(Token::Hash),
+        ));
+        let escaped = just(Token::Backslash)
+            .then(span_delim)
+            .map_with(move |_toks, e| {
+                let span: SourceSpan = e.span();
+                InlineNode::Text(TextNode {
+                    value: &source[span.start + 1..span.end],
                     location: Some(idx.location(&span)),
                 })
             });
@@ -141,7 +161,16 @@ where
                 })
             });
 
-        choice((strong, text_run))
+        // Literal backslash: a `\` not followed by a span delimiter.
+        let backslash_as_text = just(Token::Backslash).map_with(move |_tok, e| {
+            let span: SourceSpan = e.span();
+            InlineNode::Text(TextNode {
+                value: &source[span.start..span.end],
+                location: Some(idx.location(&span)),
+            })
+        });
+
+        choice((strong, escaped, text_run, backslash_as_text))
     });
 
     // Lone star fallback: a `*` that doesn't start a strong span is treated
@@ -200,7 +229,8 @@ fn run_inline_parser<'tokens, 'src: 'tokens>(
         })
         .collect();
 
-    (output.unwrap_or_default(), diagnostics)
+    let nodes = merge_text_nodes(output.unwrap_or_default(), source);
+    (nodes, diagnostics)
 }
 
 // ---------------------------------------------------------------------------
@@ -913,6 +943,58 @@ fn strip_trailing_newline_index(tokens: &[Spanned<'_>], from: usize) -> usize {
     end
 }
 
+/// Merge adjacent text nodes whose values are contiguous in the source.
+///
+/// After parsing, escaped delimiters and fallback text nodes may produce
+/// multiple adjacent `TextNode`s that represent a single logical text run
+/// (e.g., `\*not bold*` → escaped `*` + text run `not bold` + lone star `*`).
+/// This function merges them into a single `TextNode` whose value is a single
+/// slice of the source and whose location spans the full range.
+///
+/// Span nodes have their `inlines` recursively merged.
+fn merge_text_nodes<'a>(nodes: Vec<InlineNode<'a>>, source: &'a str) -> Vec<InlineNode<'a>> {
+    let source_base = source.as_ptr() as usize;
+    let mut result: Vec<InlineNode<'a>> = Vec::with_capacity(nodes.len());
+
+    for node in nodes {
+        // Recursively merge inside span nodes.
+        let node = match node {
+            InlineNode::Span(mut s) => {
+                s.inlines = merge_text_nodes(s.inlines, source);
+                InlineNode::Span(s)
+            }
+            InlineNode::Text(t) => InlineNode::Text(t),
+        };
+
+        // Try to merge with the previous text node if values are contiguous.
+        let merged = if let InlineNode::Text(curr) = &node {
+            if let Some(InlineNode::Text(prev)) = result.last_mut() {
+                let prev_offset = prev.value.as_ptr() as usize - source_base;
+                let curr_offset = curr.value.as_ptr() as usize - source_base;
+                if prev_offset + prev.value.len() == curr_offset {
+                    prev.value = &source[prev_offset..curr_offset + curr.value.len()];
+                    if let (Some(prev_loc), Some(curr_loc)) = (&mut prev.location, &curr.location) {
+                        prev_loc[1] = curr_loc[1].clone();
+                    }
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        if !merged {
+            result.push(node);
+        }
+    }
+
+    result
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -966,14 +1048,15 @@ mod tests {
     fn inline_lone_star_is_text() {
         let (nodes, diags) = parse_inlines("*hello");
         assert!(diags.is_empty());
-        assert_eq!(nodes.len(), 2);
+        assert_eq!(nodes.len(), 1);
         match &nodes[0] {
-            InlineNode::Text(t) => assert_eq!(t.value, "*"),
+            InlineNode::Text(t) => {
+                assert_eq!(t.value, "*hello");
+                let loc = t.location.as_ref().unwrap();
+                assert_eq!(loc[0], Position { line: 1, col: 1 });
+                assert_eq!(loc[1], Position { line: 1, col: 6 });
+            }
             InlineNode::Span(_) => panic!("expected Text for lone star"),
-        }
-        match &nodes[1] {
-            InlineNode::Text(t) => assert_eq!(t.value, "hello"),
-            InlineNode::Span(_) => panic!("expected Text"),
         }
     }
 
