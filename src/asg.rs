@@ -65,13 +65,15 @@ pub struct Block<'a> {
     pub location: Option<Location>,
 }
 
-/// An inline ASG node — either a text string or a formatting span.
+/// An inline ASG node — text, formatting span, or reference.
 #[derive(Debug, Clone, PartialEq)]
 pub enum InlineNode<'a> {
     /// A text string node.
     Text(TextNode<'a>),
     /// A formatting span node.
     Span(SpanNode<'a>),
+    /// An inline reference (link or cross-reference).
+    Ref(RefNode<'a>),
 }
 
 /// A leaf text node in the ASG.
@@ -91,6 +93,19 @@ pub struct SpanNode<'a> {
     /// Span form (`"constrained"` or `"unconstrained"`).
     pub form: &'static str,
     /// Child inline nodes.
+    pub inlines: Vec<InlineNode<'a>>,
+    /// Source location.
+    pub location: Option<Location>,
+}
+
+/// An inline reference (link or cross-reference).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RefNode<'a> {
+    /// Reference variant (`"link"` or `"xref"`).
+    pub variant: &'static str,
+    /// Reference target URL or path.
+    pub target: &'a str,
+    /// Child inline nodes (display text).
     pub inlines: Vec<InlineNode<'a>>,
     /// Source location.
     pub location: Option<Location>,

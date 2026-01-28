@@ -130,6 +130,7 @@ impl<'a> From<&asg::Block<'a>> for JsonBlock<'a> {
 enum JsonInlineNode<'a> {
     Text(JsonTextNode<'a>),
     Span(JsonSpanNode<'a>),
+    Ref(JsonRefNode<'a>),
 }
 
 impl<'a> From<&asg::InlineNode<'a>> for JsonInlineNode<'a> {
@@ -137,6 +138,7 @@ impl<'a> From<&asg::InlineNode<'a>> for JsonInlineNode<'a> {
         match node {
             asg::InlineNode::Text(t) => Self::Text(JsonTextNode::from(t)),
             asg::InlineNode::Span(s) => Self::Span(JsonSpanNode::from(s)),
+            asg::InlineNode::Ref(r) => Self::Ref(JsonRefNode::from(r)),
         }
     }
 }
@@ -183,6 +185,31 @@ impl<'a> From<&asg::SpanNode<'a>> for JsonSpanNode<'a> {
             form: s.form,
             inlines: s.inlines.iter().map(JsonInlineNode::from).collect(),
             location: s.location.as_ref().map(convert_location),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct JsonRefNode<'a> {
+    name: &'static str,
+    #[serde(rename = "type")]
+    node_type: &'static str,
+    variant: &'static str,
+    target: &'a str,
+    inlines: Vec<JsonInlineNode<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    location: Option<JsonLocation>,
+}
+
+impl<'a> From<&asg::RefNode<'a>> for JsonRefNode<'a> {
+    fn from(r: &asg::RefNode<'a>) -> Self {
+        Self {
+            name: "ref",
+            node_type: "inline",
+            variant: r.variant,
+            target: r.target,
+            inlines: r.inlines.iter().map(JsonInlineNode::from).collect(),
+            location: r.location.as_ref().map(convert_location),
         }
     }
 }
@@ -437,7 +464,6 @@ fn populate_asg_defaults(node: &mut Value) {
 /// Test fixtures that exercise features the parser does not yet support.
 /// Remove entries from this list as the parser gains capabilities.
 const UNSUPPORTED: &[&str] = &[
-    "inline/ref/",
     "inline/span/code/",
     "inline/span/emphasis/",
     "inline/span/mark/",

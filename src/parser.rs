@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use chumsky::{extra, input::ValueInput, prelude::*};
 
-use crate::asg::{Block, Document, Header, InlineNode, SpanNode, TextNode};
+use crate::asg::{Block, Document, Header, InlineNode, RefNode, SpanNode, TextNode};
 use crate::diagnostic::{ParseDiagnostic, Severity};
 use crate::lexer::lex;
 use crate::span::{SourceIndex, SourceSpan};
@@ -201,8 +201,8 @@ where
         .collect()
 }
 
-/// Run the inline parser on a token sub-slice, returning nodes and diagnostics.
-fn run_inline_parser<'tokens, 'src: 'tokens>(
+/// Run the chumsky inline parser on a token sub-slice without text merging.
+fn run_chumsky_inline<'tokens, 'src: 'tokens>(
     tokens: &'tokens [Spanned<'src>],
     source: &'src str,
     idx: &'tokens SourceIndex,
@@ -216,9 +216,7 @@ fn run_inline_parser<'tokens, 'src: 'tokens>(
         end: last_span.end,
     };
     let input = tokens.split_token_span(eoi);
-    let (output, errors) = inline_parser(source, idx)
-        .parse(input)
-        .into_output_errors();
+    let (output, errors) = inline_parser(source, idx).parse(input).into_output_errors();
 
     let diagnostics = errors
         .into_iter()
@@ -229,8 +227,247 @@ fn run_inline_parser<'tokens, 'src: 'tokens>(
         })
         .collect();
 
-    let nodes = merge_text_nodes(output.unwrap_or_default(), source);
-    (nodes, diagnostics)
+    (output.unwrap_or_default(), diagnostics)
+}
+
+// ---------------------------------------------------------------------------
+// Inline macro detection (procedural, runs before chumsky)
+// ---------------------------------------------------------------------------
+
+/// A detected inline macro (link, xref, or bare URL) in the token stream.
+struct MacroMatch<'a> {
+    /// Reference variant (`"link"` or `"xref"`).
+    variant: &'static str,
+    /// Target URL or path (zero-copy slice of source).
+    target: &'a str,
+    /// Token index of the first token in the macro.
+    tok_start: usize,
+    /// Token index past the last token in the macro.
+    tok_end: usize,
+    /// Token range of bracket content, if any (start inclusive, end exclusive).
+    content_tok_range: Option<(usize, usize)>,
+    /// Byte offset of the macro start in source.
+    byte_start: usize,
+    /// Byte offset of the macro end in source.
+    byte_end: usize,
+}
+
+/// Scan the token stream for inline macros (link, xref, bare URL).
+fn find_inline_macros<'src>(tokens: &[Spanned<'src>], source: &'src str) -> Vec<MacroMatch<'src>> {
+    let mut matches = Vec::new();
+    let mut i = 0;
+    while i < tokens.len() {
+        if let Some(m) = try_named_macro(tokens, i, source, "link", "link")
+            .or_else(|| try_named_macro(tokens, i, source, "xref", "xref"))
+            .or_else(|| try_bare_url(tokens, i, source))
+        {
+            let next = m.tok_end;
+            matches.push(m);
+            i = next;
+        } else {
+            i += 1;
+        }
+    }
+    matches
+}
+
+/// Try to match a named inline macro (`link:target[content]` or
+/// `xref:target[content]`) starting at token position `i`.
+fn try_named_macro<'src>(
+    tokens: &[Spanned<'src>],
+    i: usize,
+    source: &'src str,
+    macro_name: &str,
+    variant: &'static str,
+) -> Option<MacroMatch<'src>> {
+    if i + 2 >= tokens.len() {
+        return None;
+    }
+    let is_match = matches!(&tokens[i].0, Token::Text(s) if *s == macro_name);
+    if !is_match || !matches!(tokens[i + 1].0, Token::Colon) {
+        return None;
+    }
+
+    // Scan target: tokens after Colon up to LBracket.
+    let target_start = i + 2;
+    let mut j = target_start;
+    while j < tokens.len()
+        && !matches!(
+            tokens[j].0,
+            Token::LBracket | Token::Whitespace | Token::Newline
+        )
+    {
+        j += 1;
+    }
+    if j >= tokens.len() || !matches!(tokens[j].0, Token::LBracket) || j == target_start {
+        return None;
+    }
+
+    let target_byte_start = tokens[target_start].1.start;
+    let target_byte_end = tokens[j - 1].1.end;
+    let raw_target = &source[target_byte_start..target_byte_end];
+    let target = if variant == "xref" {
+        raw_target.strip_suffix(".adoc").unwrap_or(raw_target)
+    } else {
+        raw_target
+    };
+
+    // Find matching RBracket.
+    let content_start = j + 1;
+    let mut k = content_start;
+    let mut depth: u32 = 1;
+    while k < tokens.len() {
+        match tokens[k].0 {
+            Token::LBracket => depth += 1,
+            Token::RBracket => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            _ => {}
+        }
+        k += 1;
+    }
+    if depth != 0 {
+        return None;
+    }
+
+    // k is at the closing RBracket.
+    Some(MacroMatch {
+        variant,
+        target,
+        tok_start: i,
+        tok_end: k + 1,
+        content_tok_range: Some((content_start, k)),
+        byte_start: tokens[i].1.start,
+        byte_end: tokens[k].1.end,
+    })
+}
+
+/// Try to match a bare URL (`https://...` or `http://...`) starting at
+/// token position `i`.
+fn try_bare_url<'src>(
+    tokens: &[Spanned<'src>],
+    i: usize,
+    source: &'src str,
+) -> Option<MacroMatch<'src>> {
+    if i + 4 >= tokens.len() {
+        return None;
+    }
+    let is_scheme = matches!(&tokens[i].0, Token::Text(s) if *s == "https" || *s == "http");
+    if !is_scheme
+        || !matches!(tokens[i + 1].0, Token::Colon)
+        || !matches!(tokens[i + 2].0, Token::Slash)
+        || !matches!(tokens[i + 3].0, Token::Slash)
+    {
+        return None;
+    }
+
+    // URL body: consume until whitespace, newline, or end.
+    let mut j = i + 4;
+    while j < tokens.len()
+        && !matches!(
+            tokens[j].0,
+            Token::Whitespace | Token::Newline | Token::LBracket | Token::RBracket
+        )
+    {
+        j += 1;
+    }
+    if j <= i + 4 {
+        return None;
+    }
+
+    let byte_start = tokens[i].1.start;
+    let byte_end = tokens[j - 1].1.end;
+    let url = &source[byte_start..byte_end];
+
+    Some(MacroMatch {
+        variant: "link",
+        target: url,
+        tok_start: i,
+        tok_end: j,
+        content_tok_range: None,
+        byte_start,
+        byte_end,
+    })
+}
+
+/// Run the inline parser on a token sub-slice, returning nodes and diagnostics.
+///
+/// Detects inline macros (link, xref, bare URL) procedurally, parses
+/// non-macro segments and bracket content through the chumsky inline parser,
+/// and merges adjacent text nodes.
+fn run_inline_parser<'tokens, 'src: 'tokens>(
+    tokens: &'tokens [Spanned<'src>],
+    source: &'src str,
+    idx: &'tokens SourceIndex,
+) -> (Vec<InlineNode<'src>>, Vec<ParseDiagnostic>) {
+    if tokens.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+
+    let macros = find_inline_macros(tokens, source);
+
+    if macros.is_empty() {
+        let (nodes, diagnostics) = run_chumsky_inline(tokens, source, idx);
+        return (merge_text_nodes(nodes, source), diagnostics);
+    }
+
+    let mut result = Vec::new();
+    let mut diagnostics = Vec::new();
+    let mut pos = 0;
+
+    for m in &macros {
+        // Parse tokens before this macro with chumsky.
+        if pos < m.tok_start {
+            let segment = &tokens[pos..m.tok_start];
+            let (nodes, diags) = run_chumsky_inline(segment, source, idx);
+            result.extend(nodes);
+            diagnostics.extend(diags);
+        }
+
+        // Parse bracket content (if any) with chumsky.
+        let ref_inlines = if let Some((cs, ce)) = m.content_tok_range {
+            let content_tokens = &tokens[cs..ce];
+            let (nodes, diags) = run_chumsky_inline(content_tokens, source, idx);
+            diagnostics.extend(diags);
+            nodes
+        } else {
+            // Bare URL: display text is the URL itself.
+            let url_span = SourceSpan {
+                start: m.byte_start,
+                end: m.byte_end,
+            };
+            vec![InlineNode::Text(TextNode {
+                value: m.target,
+                location: Some(idx.location(&url_span)),
+            })]
+        };
+
+        let macro_span = SourceSpan {
+            start: m.byte_start,
+            end: m.byte_end,
+        };
+        result.push(InlineNode::Ref(RefNode {
+            variant: m.variant,
+            target: m.target,
+            inlines: ref_inlines,
+            location: Some(idx.location(&macro_span)),
+        }));
+
+        pos = m.tok_end;
+    }
+
+    // Parse tokens after the last macro.
+    if pos < tokens.len() {
+        let segment = &tokens[pos..];
+        let (nodes, diags) = run_chumsky_inline(segment, source, idx);
+        result.extend(nodes);
+        diagnostics.extend(diags);
+    }
+
+    (merge_text_nodes(result, source), diagnostics)
 }
 
 // ---------------------------------------------------------------------------
@@ -957,11 +1194,15 @@ fn merge_text_nodes<'a>(nodes: Vec<InlineNode<'a>>, source: &'a str) -> Vec<Inli
     let mut result: Vec<InlineNode<'a>> = Vec::with_capacity(nodes.len());
 
     for node in nodes {
-        // Recursively merge inside span nodes.
+        // Recursively merge inside span and ref nodes.
         let node = match node {
             InlineNode::Span(mut s) => {
                 s.inlines = merge_text_nodes(s.inlines, source);
                 InlineNode::Span(s)
+            }
+            InlineNode::Ref(mut r) => {
+                r.inlines = merge_text_nodes(r.inlines, source);
+                InlineNode::Ref(r)
             }
             InlineNode::Text(t) => InlineNode::Text(t),
         };
@@ -1018,7 +1259,7 @@ mod tests {
                 assert_eq!(loc[0], Position { line: 1, col: 1 });
                 assert_eq!(loc[1], Position { line: 1, col: 5 });
             }
-            InlineNode::Span(_) => panic!("expected Text node"),
+            _ => panic!("expected Text node"),
         }
     }
 
@@ -1034,13 +1275,13 @@ mod tests {
                 assert_eq!(s.inlines.len(), 1);
                 match &s.inlines[0] {
                     InlineNode::Text(t) => assert_eq!(t.value, "s"),
-                    InlineNode::Span(_) => panic!("expected inner Text"),
+                    _ => panic!("expected inner Text"),
                 }
                 let loc = s.location.as_ref().unwrap();
                 assert_eq!(loc[0], Position { line: 1, col: 1 });
                 assert_eq!(loc[1], Position { line: 1, col: 3 });
             }
-            InlineNode::Text(_) => panic!("expected Span node"),
+            _ => panic!("expected Span node"),
         }
     }
 
@@ -1056,7 +1297,7 @@ mod tests {
                 assert_eq!(loc[0], Position { line: 1, col: 1 });
                 assert_eq!(loc[1], Position { line: 1, col: 6 });
             }
-            InlineNode::Span(_) => panic!("expected Text for lone star"),
+            _ => panic!("expected Text for lone star"),
         }
     }
 
@@ -1081,7 +1322,7 @@ mod tests {
         assert_eq!(inlines.len(), 1);
         match &inlines[0] {
             InlineNode::Text(t) => assert_eq!(t.value, "hello world"),
-            InlineNode::Span(_) => panic!("expected Text"),
+            _ => panic!("expected Text"),
         }
     }
 
@@ -1103,7 +1344,7 @@ mod tests {
         assert_eq!(header.title.len(), 1);
         match &header.title[0] {
             InlineNode::Text(t) => assert_eq!(t.value, "Title"),
-            InlineNode::Span(_) => panic!("expected Text"),
+            _ => panic!("expected Text"),
         }
         assert_eq!(doc.blocks.len(), 1);
         assert!(doc.attributes.is_some());
@@ -1142,7 +1383,7 @@ mod tests {
                 assert_eq!(loc[0], Position { line: 2, col: 1 });
                 assert_eq!(loc[1], Position { line: 4, col: 3 });
             }
-            InlineNode::Span(_) => panic!("expected Text node"),
+            _ => panic!("expected Text node"),
         }
         let loc = block.location.as_ref().unwrap();
         assert_eq!(loc[0], Position { line: 1, col: 1 });
@@ -1172,7 +1413,7 @@ mod tests {
                 assert_eq!(loc[0], Position { line: 1, col: 3 });
                 assert_eq!(loc[1], Position { line: 1, col: 7 });
             }
-            InlineNode::Span(_) => panic!("expected Text node"),
+            _ => panic!("expected Text node"),
         }
         let loc = list.location.as_ref().unwrap();
         assert_eq!(loc[0], Position { line: 1, col: 1 });
@@ -1196,7 +1437,7 @@ mod tests {
                 assert_eq!(loc[0], Position { line: 1, col: 4 });
                 assert_eq!(loc[1], Position { line: 1, col: 16 });
             }
-            InlineNode::Span(_) => panic!("expected Text node"),
+            _ => panic!("expected Text node"),
         }
         let blocks = section.blocks.as_ref().unwrap();
         assert_eq!(blocks.len(), 1);
