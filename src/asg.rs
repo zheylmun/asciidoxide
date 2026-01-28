@@ -2,6 +2,17 @@
 
 use std::collections::HashMap;
 
+/// Block-level metadata (roles, options, element attributes).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct BlockMetadata<'a> {
+    /// Role classes (e.g., from `[.role1.role2]`).
+    pub roles: Vec<&'a str>,
+    /// Options (e.g., from `[%option]`).
+    pub options: Vec<&'a str>,
+    /// Element attributes (e.g., `name=value`).
+    pub attributes: HashMap<&'a str, &'a str>,
+}
+
 /// A 1-based source position (line and column).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Position {
@@ -45,6 +56,14 @@ pub struct Block<'a> {
     pub form: Option<&'static str>,
     /// Delimiter string for delimited blocks.
     pub delimiter: Option<&'a str>,
+    /// Block or section ID (e.g., from `[[id]]` or `[#id]`).
+    pub id: Option<&'a str>,
+    /// Block style (e.g., `"appendix"`, `"discrete"`, `"source"`, `"abstract"`).
+    pub style: Option<&'a str>,
+    /// Reference text for cross-references (e.g., from `[[id,reftext]]`).
+    pub reftext: Option<&'a str>,
+    /// Block metadata (roles, options, attributes).
+    pub metadata: Option<BlockMetadata<'a>>,
     /// Section title as inline nodes.
     pub title: Option<Vec<InlineNode<'a>>>,
     /// Section level (0-5).

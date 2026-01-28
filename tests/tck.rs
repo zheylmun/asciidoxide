@@ -62,6 +62,26 @@ impl<'a> From<&asg::Header<'a>> for JsonHeader<'a> {
 }
 
 #[derive(Serialize)]
+struct JsonBlockMetadata<'a> {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    roles: Vec<&'a str>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    options: Vec<&'a str>,
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    attributes: HashMap<&'a str, &'a str>,
+}
+
+impl<'a> From<&asg::BlockMetadata<'a>> for JsonBlockMetadata<'a> {
+    fn from(m: &asg::BlockMetadata<'a>) -> Self {
+        Self {
+            roles: m.roles.clone(),
+            options: m.options.clone(),
+            attributes: m.attributes.clone(),
+        }
+    }
+}
+
+#[derive(Serialize)]
 struct JsonBlock<'a> {
     name: &'static str,
     #[serde(rename = "type")]
@@ -70,6 +90,14 @@ struct JsonBlock<'a> {
     form: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     delimiter: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    style: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reftext: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metadata: Option<JsonBlockMetadata<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     title: Option<Vec<JsonInlineNode<'a>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -97,6 +125,10 @@ impl<'a> From<&asg::Block<'a>> for JsonBlock<'a> {
             node_type: "block",
             form: b.form,
             delimiter: b.delimiter,
+            id: b.id,
+            style: b.style,
+            reftext: b.reftext,
+            metadata: b.metadata.as_ref().map(JsonBlockMetadata::from),
             title: b
                 .title
                 .as_ref()
