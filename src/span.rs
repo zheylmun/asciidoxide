@@ -114,6 +114,11 @@ pub struct SourceIndex {
     /// Byte offset of the first character on each line.
     /// `line_starts[0]` is always `0`.
     line_starts: Vec<usize>,
+    /// 0-based character column for each byte offset.
+    ///
+    /// Multi-byte characters map all their bytes to the same column.
+    /// Length is `source.len() + 1` (extra slot for end-of-input).
+    byte_to_col: Vec<usize>,
 }
 
 impl SourceIndex {
@@ -121,24 +126,39 @@ impl SourceIndex {
     #[must_use]
     pub fn new(source: &str) -> Self {
         let mut line_starts = vec![0];
-        for (i, byte) in source.bytes().enumerate() {
-            if byte == b'\n' {
+        let mut byte_to_col = vec![0; source.len() + 1];
+        let mut col: usize = 0;
+
+        for (i, ch) in source.char_indices() {
+            for slot in byte_to_col.iter_mut().skip(i).take(ch.len_utf8()) {
+                *slot = col;
+            }
+            if ch == '\n' {
                 line_starts.push(i + 1);
+                col = 0;
+            } else {
+                col += 1;
             }
         }
-        Self { line_starts }
+        byte_to_col[source.len()] = col;
+
+        Self {
+            line_starts,
+            byte_to_col,
+        }
     }
 
     /// Convert a byte offset to a 1-based [`Position`].
     ///
-    /// The column value counts bytes from the start of the line (1-based).
+    /// The column value counts Unicode characters from the start of the line
+    /// (1-based).
     #[must_use]
     pub fn position(&self, byte_offset: usize) -> Position {
         let line = self
             .line_starts
             .partition_point(|&start| start <= byte_offset)
             - 1;
-        let col = byte_offset - self.line_starts[line];
+        let col = self.byte_to_col[byte_offset];
         Position {
             line: line + 1,
             col: col + 1,
