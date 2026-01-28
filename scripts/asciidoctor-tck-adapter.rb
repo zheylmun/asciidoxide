@@ -275,6 +275,24 @@ def walk_block(node)
     walk_admonition(node)
   when :preamble
     walk_preamble(node)
+  when :quote
+    walk_quote(node)
+  when :pass
+    walk_pass(node)
+  when :thematic_break
+    walk_thematic_break(node)
+  when :page_break
+    walk_page_break(node)
+  when :verse
+    walk_verse(node)
+  when :dlist
+    walk_dlist(node)
+  when :image
+    walk_image(node)
+  when :stem
+    walk_stem(node)
+  when :floating_title
+    walk_heading(node)
   else
     { 'name' => node.context.to_s, 'type' => 'block' }
   end
@@ -289,6 +307,7 @@ def walk_document(node)
     next if key.is_a?(Integer)
     next if DEFAULT_ATTR_KEYS.include?(key)
     next if AUTO_GENERATED_ATTRS.include?(key.to_s)
+    next if key.to_s =~ /\A(author|firstname|lastname|middlename|email|authorinitials)(_\d+)\z/
     user_attrs[key.to_s] = val.to_s
   end
 
@@ -297,9 +316,33 @@ def walk_document(node)
     header = {}
     title_text = node.doctitle
     if title_text
-      header['title'] = [{ 'name' => 'text', 'type' => 'string', 'value' => decode_entities(title_text) }]
+      header['title'] = extract_inlines(title_text)
+    end
+    # Authors
+    if node.attributes['authors'] && !node.attributes['authors'].to_s.empty?
+      authors = []
+      # Asciidoctor stores authors in numbered attributes
+      i = 1
+      loop do
+        author_key = i == 1 ? 'author' : "author_#{i}"
+        break unless node.attributes[author_key]
+        author = {}
+        prefix = i == 1 ? '' : "_#{i}"
+        author['fullname'] = node.attributes["author#{prefix}"].to_s if node.attributes["author#{prefix}"]
+        author['initials'] = node.attributes["authorinitials#{prefix}"].to_s if node.attributes["authorinitials#{prefix}"]
+        author['firstname'] = node.attributes["firstname#{prefix}"].to_s if node.attributes["firstname#{prefix}"]
+        author['middlename'] = node.attributes["middlename#{prefix}"].to_s if node.attributes["middlename#{prefix}"]
+        author['lastname'] = node.attributes["lastname#{prefix}"].to_s if node.attributes["lastname#{prefix}"]
+        author['address'] = node.attributes["email#{prefix}"].to_s if node.attributes["email#{prefix}"]
+        authors << author
+        i += 1
+      end
+      header['authors'] = authors unless authors.empty?
     end
     result['header'] = header
+  elsif !user_attrs.empty?
+    # Output attributes even without a header (body-level attribute entries)
+    result['attributes'] = user_attrs
   end
 
   result['blocks'] = node.blocks.flat_map { |b|
@@ -311,6 +354,7 @@ end
 
 def walk_section(node)
   result = { 'name' => 'section', 'type' => 'block' }
+  result['id'] = node.id if node.id
   title = node.title
   if title
     result['title'] = extract_inlines(title)
@@ -331,11 +375,21 @@ def walk_listing(node)
   result = { 'name' => 'listing', 'type' => 'block' }
   result['form'] = 'delimited'
   result['delimiter'] = node.attributes['delimiter'] || '----'
-  result['inlines'] = [{
-    'name'  => 'text',
-    'type'  => 'string',
-    'value' => node.source,
-  }]
+  add_block_common(result, node)
+  # Source language from [source,lang] or [,lang] promotion
+  if node.attributes['language']
+    result['metadata'] ||= {}
+    result['metadata']['attributes'] ||= {}
+    result['metadata']['attributes']['language'] = node.attributes['language']
+  end
+  source = node.source
+  if source && !source.empty?
+    result['inlines'] = [{
+      'name'  => 'text',
+      'type'  => 'string',
+      'value' => source,
+    }]
+  end
   result
 end
 
@@ -343,6 +397,7 @@ def walk_sidebar(node)
   result = { 'name' => 'sidebar', 'type' => 'block' }
   result['form'] = 'delimited'
   result['delimiter'] = '****'
+  add_block_common(result, node)
   result['blocks'] = node.blocks.map { |b| walk_block(b) }
   result
 end
@@ -378,11 +433,15 @@ def walk_literal(node)
   result = { 'name' => 'literal', 'type' => 'block' }
   result['form'] = 'delimited'
   result['delimiter'] = node.attributes['delimiter'] || '....'
-  result['inlines'] = [{
-    'name'  => 'text',
-    'type'  => 'string',
-    'value' => node.source,
-  }]
+  add_block_common(result, node)
+  source = node.source
+  if source && !source.empty?
+    result['inlines'] = [{
+      'name'  => 'text',
+      'type'  => 'string',
+      'value' => source,
+    }]
+  end
   result
 end
 
@@ -390,6 +449,7 @@ def walk_example(node)
   result = { 'name' => 'example', 'type' => 'block' }
   result['form'] = 'delimited'
   result['delimiter'] = '===='
+  add_block_common(result, node)
   result['blocks'] = node.blocks.map { |b| walk_block(b) }
   result
 end
@@ -398,6 +458,7 @@ def walk_open(node)
   result = { 'name' => 'open', 'type' => 'block' }
   result['form'] = 'delimited'
   result['delimiter'] = '--'
+  add_block_common(result, node)
   result['blocks'] = node.blocks.map { |b| walk_block(b) }
   result
 end
@@ -411,6 +472,125 @@ end
 def walk_preamble(node)
   # Preamble is transparent — just emit its child blocks
   node.blocks.map { |b| walk_block(b) }
+end
+
+def walk_quote(node)
+  result = { 'name' => 'quote', 'type' => 'block' }
+  result['form'] = 'delimited'
+  result['delimiter'] = '____'
+  add_block_common(result, node)
+  if node.attributes['attribution'] || node.attributes['citetitle']
+    result['metadata'] ||= {}
+    result['metadata']['attributes'] ||= {}
+    result['metadata']['attributes']['attribution'] = node.attributes['attribution'] if node.attributes['attribution']
+    result['metadata']['attributes']['citetitle'] = node.attributes['citetitle'] if node.attributes['citetitle']
+  end
+  result['blocks'] = node.blocks.map { |b| walk_block(b) }
+  result
+end
+
+def walk_pass(node)
+  result = { 'name' => 'pass', 'type' => 'block' }
+  result['form'] = 'delimited'
+  result['delimiter'] = node.attributes['delimiter'] || '++++'
+  add_block_common(result, node)
+  source = node.source
+  if source && !source.empty?
+    result['inlines'] = [{
+      'name'  => 'text',
+      'type'  => 'string',
+      'value' => source,
+    }]
+  end
+  result
+end
+
+def walk_thematic_break(node)
+  { 'name' => 'break', 'type' => 'block', 'variant' => 'thematic' }
+end
+
+def walk_page_break(node)
+  { 'name' => 'break', 'type' => 'block', 'variant' => 'page' }
+end
+
+def walk_verse(node)
+  result = { 'name' => 'verse', 'type' => 'block' }
+  result['form'] = 'delimited'
+  result['delimiter'] = '____'
+  add_block_common(result, node)
+  source = node.source
+  if source && !source.empty?
+    result['inlines'] = [{ 'name' => 'text', 'type' => 'string', 'value' => source }]
+  end
+  result
+end
+
+def walk_dlist(node)
+  result = { 'name' => 'dlist', 'type' => 'block' }
+  result['marker'] = '::'
+  add_block_common(result, node)
+  result['items'] = node.items.map { |terms, dd|
+    item = { 'name' => 'dlistItem', 'type' => 'block' }
+    item['marker'] = '::'
+    item['terms'] = terms.map { |t| extract_inlines(t.text) }
+    if dd
+      content = dd.text
+      item['principal'] = extract_inlines(content) if content && !content.empty?
+      if dd.blocks && !dd.blocks.empty?
+        item['blocks'] = dd.blocks.map { |b| walk_block(b) }
+      end
+    end
+    item
+  }
+  result
+end
+
+def walk_image(node)
+  result = { 'name' => 'image', 'type' => 'block' }
+  result['form'] = 'macro'
+  result['target'] = node.attributes['target'] || ''
+  add_block_common(result, node)
+  result
+end
+
+def walk_stem(node)
+  result = { 'name' => 'stem', 'type' => 'block' }
+  result['form'] = 'delimited'
+  result['delimiter'] = '++++'
+  add_block_common(result, node)
+  source = node.source
+  if source && !source.empty?
+    result['inlines'] = [{ 'name' => 'text', 'type' => 'string', 'value' => source }]
+  end
+  result
+end
+
+def walk_heading(node)
+  result = { 'name' => 'heading', 'type' => 'block' }
+  result['level'] = node.level
+  title_text = node.title
+  result['title'] = extract_inlines(title_text) if title_text
+  add_block_common(result, node)
+  result
+end
+
+# Add common block metadata (id, block title, reftext, metadata) to a result hash
+def add_block_common(result, node)
+  result['id'] = node.id if node.id
+  # Block title (from .Title syntax) — sections/headings/document handle title themselves
+  if !%w[section heading document].include?(result['name']) && node.respond_to?(:title?) && node.title?
+    result['title'] = extract_inlines(node.title)
+  end
+  result['reftext'] = node.attributes['reftext'].to_s if node.attributes['reftext']
+  # Metadata object
+  metadata = {}
+  roles = node.role ? node.role.split(' ') : []
+  metadata['roles'] = roles unless roles.empty?
+  if node.attributes['options']
+    opts = node.attributes['options'].split(',').map(&:strip)
+    metadata['options'] = opts unless opts.empty?
+  end
+  result['metadata'] = metadata unless metadata.empty?
 end
 
 # ---------------------------------------------------------------------------
