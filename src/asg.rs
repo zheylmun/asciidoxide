@@ -60,8 +60,8 @@ pub struct Block<'a> {
     pub id: Option<&'a str>,
     /// Block style (e.g., `"appendix"`, `"discrete"`, `"source"`, `"abstract"`).
     pub style: Option<&'a str>,
-    /// Reference text for cross-references (e.g., from `[[id,reftext]]`).
-    pub reftext: Option<&'a str>,
+    /// Reference text for cross-references (e.g., from `[[id,reftext]]`), as inline nodes.
+    pub reftext: Option<Vec<InlineNode<'a>>>,
     /// Block metadata (roles, options, attributes).
     pub metadata: Option<BlockMetadata<'a>>,
     /// Section title as inline nodes.

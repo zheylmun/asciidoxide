@@ -95,7 +95,7 @@ struct JsonBlock<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     style: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    reftext: Option<&'a str>,
+    reftext: Option<Vec<JsonInlineNode<'a>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     metadata: Option<JsonBlockMetadata<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -127,7 +127,10 @@ impl<'a> From<&asg::Block<'a>> for JsonBlock<'a> {
             delimiter: b.delimiter,
             id: b.id,
             style: b.style,
-            reftext: b.reftext,
+            reftext: b
+                .reftext
+                .as_ref()
+                .map(|v| v.iter().map(JsonInlineNode::from).collect()),
             metadata: b.metadata.as_ref().map(JsonBlockMetadata::from),
             title: b
                 .title
