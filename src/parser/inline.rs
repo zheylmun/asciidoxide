@@ -145,32 +145,99 @@ where
     (unconstrained, constrained)
 }
 
-/// Build a recursive chumsky parser for inline content.
+/// Parsers for inline mark spans: unconstrained (`##mark##`) and
+/// constrained (`#mark#`). Mark content supports nested formatting.
 ///
-/// The parser produces `Vec<InlineNode>` from a token stream, using the source
-/// string for zero-copy text slicing and the source index for locations.
-///
-/// The `star_as_text` fallback lives *outside* the recursive parser so that it
-/// is only available at the top level — inside delimited spans (e.g., `*…*`)
-/// a `Star` token is never consumed as literal text, allowing `delimited_by`
-/// to match the closing delimiter.
-fn inline_parser<'tokens, 'src: 'tokens, I>(
+/// Returns `(unconstrained, constrained)` — unconstrained must be tried first
+/// so that double-hash delimiters are not consumed as two single hashes.
+fn mark_span_parsers<'tokens, 'src: 'tokens, I, P>(
+    inner: P,
+    idx: &'tokens SourceIndex,
+) -> (
+    impl Parser<'tokens, I, InlineNode<'src>, ParseExtra<'tokens, 'src>> + Clone + 'tokens,
+    impl Parser<'tokens, I, InlineNode<'src>, ParseExtra<'tokens, 'src>> + Clone + 'tokens,
+)
+where
+    I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
+    P: Parser<'tokens, I, InlineNode<'src>, ParseExtra<'tokens, 'src>> + Clone + 'tokens,
+{
+    let inner_content = inner
+        .repeated()
+        .at_least(1)
+        .collect::<Vec<InlineNode<'src>>>();
+
+    let unconstrained = inner_content
+        .clone()
+        .delimited_by(
+            just(Token::Hash).then(just(Token::Hash)),
+            just(Token::Hash).then(just(Token::Hash)),
+        )
+        .map_with(move |inlines: Vec<InlineNode<'src>>, e| {
+            let span: SourceSpan = e.span();
+            InlineNode::Span(SpanNode {
+                variant: "mark",
+                form: "unconstrained",
+                inlines,
+                location: Some(idx.location(&span)),
+            })
+        });
+
+    let constrained = inner_content
+        .delimited_by(just(Token::Hash), just(Token::Hash))
+        .map_with(move |inlines: Vec<InlineNode<'src>>, e| {
+            let span: SourceSpan = e.span();
+            InlineNode::Span(SpanNode {
+                variant: "mark",
+                form: "constrained",
+                inlines,
+                location: Some(idx.location(&span)),
+            })
+        });
+
+    (unconstrained, constrained)
+}
+
+/// Parser that treats a single token as literal text.
+fn token_as_text<'tokens, 'src: 'tokens, I>(
+    token: Token<'src>,
     source: &'src str,
     idx: &'tokens SourceIndex,
-) -> impl Parser<'tokens, I, Vec<InlineNode<'src>>, ParseExtra<'tokens, 'src>> + 'tokens
+) -> impl Parser<'tokens, I, InlineNode<'src>, ParseExtra<'tokens, 'src>> + Clone + 'tokens
 where
     I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
 {
-    // The recursive parser handles a single inline node (strong span, escaped
-    // delimiter, text run, or literal backslash). It does NOT include
-    // `star_as_text`, so a `Star` token inside a delimited span remains
-    // available for the closing delimiter.
-    let single_inline = recursive(|single_inline| {
+    just(token).map_with(move |_tok, e| {
+        let span: SourceSpan = e.span();
+        InlineNode::Text(TextNode {
+            value: &source[span.start..span.end],
+            location: Some(idx.location(&span)),
+        })
+    })
+}
+
+/// Build the recursive inline parser that recognises spans and delimiters.
+///
+/// Returns a single-node parser. Delimiter tokens (`*`, `` ` ``, `_`, `#`)
+/// that do not open a span are **not** consumed here — they are handled by
+/// top-level fallbacks so that closing delimiters remain available inside
+/// nested spans.
+fn single_inline_parser<'tokens, 'src: 'tokens, I>(
+    source: &'src str,
+    idx: &'tokens SourceIndex,
+) -> impl Parser<'tokens, I, InlineNode<'src>, ParseExtra<'tokens, 'src>> + Clone + 'tokens
+where
+    I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
+{
+    recursive(|single_inline| {
         let text_run = any()
             .filter(|t: &Token| {
                 !matches!(
                     t,
-                    Token::Star | Token::Backslash | Token::Backtick | Token::Underscore
+                    Token::Star
+                        | Token::Backslash
+                        | Token::Backtick
+                        | Token::Underscore
+                        | Token::Hash
                 )
             })
             .repeated()
@@ -206,15 +273,10 @@ where
 
         let (code_unconstrained, code_constrained) = code_span_parsers(source, idx);
         let (emphasis_unconstrained, emphasis_constrained) =
-            emphasis_span_parsers(single_inline, idx);
+            emphasis_span_parsers(single_inline.clone(), idx);
+        let (mark_unconstrained, mark_constrained) = mark_span_parsers(single_inline, idx);
 
-        let backslash_as_text = just(Token::Backslash).map_with(move |_tok, e| {
-            let span: SourceSpan = e.span();
-            InlineNode::Text(TextNode {
-                value: &source[span.start..span.end],
-                location: Some(idx.location(&span)),
-            })
-        });
+        let backslash_as_text = token_as_text(Token::Backslash, source, idx);
 
         choice((
             strong,
@@ -222,41 +284,35 @@ where
             code_constrained,
             emphasis_unconstrained,
             emphasis_constrained,
+            mark_unconstrained,
+            mark_constrained,
             escaped,
             text_run,
             backslash_as_text,
         ))
-    });
+    })
+}
 
-    // Lone star fallback: a `*` that doesn't start a strong span is treated
-    // as literal text. This is only available at the top level.
-    let star_as_text = just(Token::Star).map_with(move |_tok, e| {
-        let span: SourceSpan = e.span();
-        InlineNode::Text(TextNode {
-            value: &source[span.start..span.end],
-            location: Some(idx.location(&span)),
-        })
-    });
+/// Build a recursive chumsky parser for inline content.
+///
+/// The parser produces `Vec<InlineNode>` from a token stream, using the source
+/// string for zero-copy text slicing and the source index for locations.
+///
+/// Delimiter-as-text fallbacks live *outside* the recursive parser so that
+/// delimiter tokens inside spans remain available for closing delimiters.
+fn inline_parser<'tokens, 'src: 'tokens, I>(
+    source: &'src str,
+    idx: &'tokens SourceIndex,
+) -> impl Parser<'tokens, I, Vec<InlineNode<'src>>, ParseExtra<'tokens, 'src>> + 'tokens
+where
+    I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
+{
+    let single_inline = single_inline_parser(source, idx);
 
-    // Lone backtick fallback: a `` ` `` that doesn't start a code span is
-    // treated as literal text. This is only available at the top level.
-    let backtick_as_text = just(Token::Backtick).map_with(move |_tok, e| {
-        let span: SourceSpan = e.span();
-        InlineNode::Text(TextNode {
-            value: &source[span.start..span.end],
-            location: Some(idx.location(&span)),
-        })
-    });
-
-    // Lone underscore fallback: a `_` that doesn't start an emphasis span is
-    // treated as literal text. This is only available at the top level.
-    let underscore_as_text = just(Token::Underscore).map_with(move |_tok, e| {
-        let span: SourceSpan = e.span();
-        InlineNode::Text(TextNode {
-            value: &source[span.start..span.end],
-            location: Some(idx.location(&span)),
-        })
-    });
+    let star_as_text = token_as_text(Token::Star, source, idx);
+    let backtick_as_text = token_as_text(Token::Backtick, source, idx);
+    let underscore_as_text = token_as_text(Token::Underscore, source, idx);
+    let hash_as_text = token_as_text(Token::Hash, source, idx);
 
     // Catch-all recovery: if all grammar branches fail on a token, consume
     // it as a text node. This emits the original parse error as a diagnostic
@@ -274,6 +330,7 @@ where
         star_as_text,
         backtick_as_text,
         underscore_as_text,
+        hash_as_text,
     ))
     .recover_with(via_parser(catch_all))
     .repeated()
