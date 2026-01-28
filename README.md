@@ -1,7 +1,7 @@
 # asciidoc
 
 High performance [AsciiDoc](https://asciidoc.org) lexer and parser library written in safe Rust.
-The project aims to provide a zero-copy, spec-compliant AsciiDoc parser.
+The project aims to provide a zero-copy, spec-compliant `AsciiDoc` parser.
 The library uses [chumsky](https://github.com/zesterer/chumsky) for lexing and parsing,
 with errors provided by [ariadne](https://github.com/zesterer/ariadne).
 No additional features beyond lexing and parsing are planned for this crate.
@@ -17,7 +17,7 @@ cargo build
 This project has two test suites:
 
 1. **Rust test suite** — Unit tests and integration tests using local TCK fixtures
-2. **TCK harness validation** — Integration with the official Eclipse AsciiDoc TCK harness
+2. **TCK harness validation** — Integration with the official Eclipse `AsciiDoc` TCK harness
 
 ### Rust Test Suite
 
@@ -41,7 +41,7 @@ The integration tests in `tests/tck.rs` load fixture pairs from `language_reposi
 
 ### TCK Harness Validation (Eclipse Foundation)
 
-The [AsciiDoc Technology Compatibility Kit (TCK)](https://github.com/asciidoc/asciidoc-tck) is an official test suite maintained by the Eclipse Foundation to verify parser compliance with the AsciiDoc Language specification.
+The [`AsciiDoc` Technology Compatibility Kit (TCK)](https://github.com/asciidoc/asciidoc-tck) is an official test suite maintained by the Eclipse Foundation to verify parser compliance with the `AsciiDoc` Language specification.
 
 This project includes integration with the TCK's Node.js harness, which invokes our parser as an external adapter and validates output against the official fixtures.
 
@@ -134,6 +134,16 @@ language_repositories/
 └── asciidoc_tck/   # Technology Compatibility Kit (git submodule)
 ```
 
+## Acknowledgments
+
+This project would not be possible without the work of the `AsciiDoc` community:
+
+- [`AsciiDoc` Language Specification](https://github.com/asciidoc/asciidoc-lang) — The official language specification maintained by the Eclipse Foundation. This project aims to be a compliant implementation of this spec.
+- [`AsciiDoc` Technology Compatibility Kit (TCK)](https://github.com/asciidoc/asciidoc-tck) — The official test suite for verifying parser compliance. Used extensively to validate this parser's output.
+- [Asciidoctor](https://github.com/asciidoctor/asciidoctor) — The reference `AsciiDoc` processor. Its comprehensive test suite and documentation have been invaluable for understanding `AsciiDoc` semantics.
+
+Thank you to all the contributors to these projects for making `AsciiDoc` an awesome, open, well-specified document format.
+
 ## License
 
-See LICENSE file.
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT) at your option.
