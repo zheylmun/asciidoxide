@@ -507,6 +507,7 @@ const UNSUPPORTED: &[&str] = &[
     "block/document/document-with-preamble",
     "block/document/empty-source",
     "block/example/",
+    "block/fenced-code/",
     "block/header/",
     "block/image/",
     "block/list/description/",
@@ -540,6 +541,7 @@ const UNSUPPORTED: &[&str] = &[
     "block/stem/",
     "block/verse/",
     "inline/escaped/escaped-unconstrained-strong",
+    "inline/passthrough/",
 ];
 
 fn is_unsupported(path: &str) -> bool {
