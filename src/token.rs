@@ -95,6 +95,14 @@ pub enum Token<'a> {
     /// A run of characters that are not `AsciiDoc`-significant punctuation,
     /// whitespace, or newlines. References a slice of the input.
     Text(&'a str),
+
+    // --- Internal ---
+    /// A placeholder for a pre-parsed inline macro (link, xref, bare URL).
+    ///
+    /// The `usize` is an index into the pre-parsed node table. This variant
+    /// is never produced by the lexer — it is injected by the inline parser
+    /// to let chumsky match span delimiters across macro boundaries.
+    Placeholder(usize),
 }
 
 impl std::fmt::Display for Token<'_> {
@@ -127,6 +135,7 @@ impl std::fmt::Display for Token<'_> {
             Token::LBrace => write!(f, "'{{'"),
             Token::RBrace => write!(f, "'}}'"),
             Token::Text(s) => write!(f, "{s}"),
+            Token::Placeholder(i) => write!(f, "<placeholder:{i}>"),
         }
     }
 }

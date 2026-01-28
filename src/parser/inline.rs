@@ -221,9 +221,13 @@ where
 /// that do not open a span are **not** consumed here — they are handled by
 /// top-level fallbacks so that closing delimiters remain available inside
 /// nested spans.
+///
+/// `pre_parsed` holds inline nodes for `Placeholder` tokens injected by the
+/// macro detection pass. When no macros are present the slice is empty.
 fn single_inline_parser<'tokens, 'src: 'tokens, I>(
     source: &'src str,
     idx: &'tokens SourceIndex,
+    pre_parsed: &'tokens [InlineNode<'src>],
 ) -> impl Parser<'tokens, I, InlineNode<'src>, ParseExtra<'tokens, 'src>> + Clone + 'tokens
 where
     I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
@@ -238,6 +242,7 @@ where
                         | Token::Backtick
                         | Token::Underscore
                         | Token::Hash
+                        | Token::Placeholder(_)
                 )
             })
             .repeated()
@@ -278,6 +283,14 @@ where
 
         let backslash_as_text = token_as_text(Token::Backslash, source, idx);
 
+        // Match a Placeholder token and return the pre-parsed inline node.
+        let placeholder = any()
+            .filter(|t: &Token| matches!(t, Token::Placeholder(_)))
+            .map(move |tok| match tok {
+                Token::Placeholder(i) => pre_parsed[i].clone(),
+                _ => unreachable!(),
+            });
+
         choice((
             strong,
             code_unconstrained,
@@ -286,6 +299,7 @@ where
             emphasis_constrained,
             mark_unconstrained,
             mark_constrained,
+            placeholder,
             escaped,
             text_run,
             backslash_as_text,
@@ -303,11 +317,12 @@ where
 fn inline_parser<'tokens, 'src: 'tokens, I>(
     source: &'src str,
     idx: &'tokens SourceIndex,
+    pre_parsed: &'tokens [InlineNode<'src>],
 ) -> impl Parser<'tokens, I, Vec<InlineNode<'src>>, ParseExtra<'tokens, 'src>> + 'tokens
 where
     I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
 {
-    let single_inline = single_inline_parser(source, idx);
+    let single_inline = single_inline_parser(source, idx, pre_parsed);
 
     let star_as_text = token_as_text(Token::Star, source, idx);
     let backtick_as_text = token_as_text(Token::Backtick, source, idx);
@@ -343,6 +358,7 @@ fn run_chumsky_inline<'tokens, 'src: 'tokens>(
     tokens: &'tokens [Spanned<'src>],
     source: &'src str,
     idx: &'tokens SourceIndex,
+    pre_parsed: &'tokens [InlineNode<'src>],
 ) -> (Vec<InlineNode<'src>>, Vec<ParseDiagnostic>) {
     let Some(last) = tokens.last() else {
         return (Vec::new(), Vec::new());
@@ -353,7 +369,9 @@ fn run_chumsky_inline<'tokens, 'src: 'tokens>(
         end: last_span.end,
     };
     let input = tokens.split_token_span(eoi);
-    let (output, errors) = inline_parser(source, idx).parse(input).into_output_errors();
+    let (output, errors) = inline_parser(source, idx, pre_parsed)
+        .parse(input)
+        .into_output_errors();
 
     let diagnostics: Vec<ParseDiagnostic> = errors
         .into_iter()
@@ -532,9 +550,10 @@ fn try_bare_url<'src>(
 
 /// Run the inline parser on a token sub-slice, returning nodes and diagnostics.
 ///
-/// Detects inline macros (link, xref, bare URL) procedurally, parses
-/// non-macro segments and bracket content through the chumsky inline parser,
-/// and merges adjacent text nodes.
+/// Detects inline macros (link, xref, bare URL) procedurally, replaces
+/// each macro's token range with a single `Placeholder` token, then runs
+/// the chumsky parser on the unified stream so that span delimiters can
+/// match across macro boundaries. Adjacent text nodes are merged.
 pub(super) fn run_inline_parser<'tokens, 'src: 'tokens>(
     tokens: &'tokens [Spanned<'src>],
     source: &'src str,
@@ -547,27 +566,21 @@ pub(super) fn run_inline_parser<'tokens, 'src: 'tokens>(
     let macros = find_inline_macros(tokens, source);
 
     if macros.is_empty() {
-        let (nodes, diagnostics) = run_chumsky_inline(tokens, source, idx);
+        let empty: &[InlineNode<'src>] = &[];
+        let (nodes, diagnostics) = run_chumsky_inline(tokens, source, idx, empty);
         return (merge_text_nodes(nodes, source), diagnostics);
     }
 
-    let mut result = Vec::new();
+    // Pre-parse each macro into an InlineNode and build a unified token
+    // stream with Placeholder tokens replacing macro token ranges.
+    let mut pre_parsed: Vec<InlineNode<'src>> = Vec::with_capacity(macros.len());
     let mut diagnostics = Vec::new();
-    let mut pos = 0;
 
+    let empty: &[InlineNode<'src>] = &[];
     for m in &macros {
-        // Parse tokens before this macro with chumsky.
-        if pos < m.tok_start {
-            let segment = &tokens[pos..m.tok_start];
-            let (nodes, diags) = run_chumsky_inline(segment, source, idx);
-            result.extend(nodes);
-            diagnostics.extend(diags);
-        }
-
-        // Parse bracket content (if any) with chumsky.
         let ref_inlines = if let Some((cs, ce)) = m.content_tok_range {
             let content_tokens = &tokens[cs..ce];
-            let (nodes, diags) = run_chumsky_inline(content_tokens, source, idx);
+            let (nodes, diags) = run_chumsky_inline(content_tokens, source, idx, empty);
             diagnostics.extend(diags);
             nodes
         } else {
@@ -586,25 +599,38 @@ pub(super) fn run_inline_parser<'tokens, 'src: 'tokens>(
             start: m.byte_start,
             end: m.byte_end,
         };
-        result.push(InlineNode::Ref(RefNode {
+        pre_parsed.push(InlineNode::Ref(RefNode {
             variant: m.variant,
             target: m.target,
             inlines: ref_inlines,
             location: Some(idx.location(&macro_span)),
         }));
+    }
 
+    // Build unified stream: copy non-macro tokens, replace each macro range
+    // with a single Placeholder token.
+    let mut unified: Vec<Spanned<'src>> = Vec::with_capacity(tokens.len());
+    let mut pos = 0;
+    for (i, m) in macros.iter().enumerate() {
+        // Copy tokens before this macro.
+        unified.extend_from_slice(&tokens[pos..m.tok_start]);
+        // Insert placeholder with the macro's byte span.
+        unified.push((
+            Token::Placeholder(i),
+            SourceSpan {
+                start: m.byte_start,
+                end: m.byte_end,
+            },
+        ));
         pos = m.tok_end;
     }
+    // Copy tokens after the last macro.
+    unified.extend_from_slice(&tokens[pos..]);
 
-    // Parse tokens after the last macro.
-    if pos < tokens.len() {
-        let segment = &tokens[pos..];
-        let (nodes, diags) = run_chumsky_inline(segment, source, idx);
-        result.extend(nodes);
-        diagnostics.extend(diags);
-    }
+    let (nodes, chumsky_diags) = run_chumsky_inline(&unified, source, idx, &pre_parsed);
+    diagnostics.extend(chumsky_diags);
 
-    (merge_text_nodes(result, source), diagnostics)
+    (merge_text_nodes(nodes, source), diagnostics)
 }
 
 /// Merge adjacent text nodes whose values are contiguous in the source.
