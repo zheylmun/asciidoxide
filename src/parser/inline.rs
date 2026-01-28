@@ -93,6 +93,58 @@ where
     (unconstrained, constrained)
 }
 
+/// Parsers for inline emphasis spans: unconstrained (`__emphasis__`) and
+/// constrained (`_emphasis_`). Emphasis content supports nested formatting.
+///
+/// Returns `(unconstrained, constrained)` — unconstrained must be tried first
+/// so that double-underscore delimiters are not consumed as two single underscores.
+fn emphasis_span_parsers<'tokens, 'src: 'tokens, I, P>(
+    inner: P,
+    idx: &'tokens SourceIndex,
+) -> (
+    impl Parser<'tokens, I, InlineNode<'src>, ParseExtra<'tokens, 'src>> + Clone + 'tokens,
+    impl Parser<'tokens, I, InlineNode<'src>, ParseExtra<'tokens, 'src>> + Clone + 'tokens,
+)
+where
+    I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
+    P: Parser<'tokens, I, InlineNode<'src>, ParseExtra<'tokens, 'src>> + Clone + 'tokens,
+{
+    let inner_content = inner
+        .repeated()
+        .at_least(1)
+        .collect::<Vec<InlineNode<'src>>>();
+
+    let unconstrained = inner_content
+        .clone()
+        .delimited_by(
+            just(Token::Underscore).then(just(Token::Underscore)),
+            just(Token::Underscore).then(just(Token::Underscore)),
+        )
+        .map_with(move |inlines: Vec<InlineNode<'src>>, e| {
+            let span: SourceSpan = e.span();
+            InlineNode::Span(SpanNode {
+                variant: "emphasis",
+                form: "unconstrained",
+                inlines,
+                location: Some(idx.location(&span)),
+            })
+        });
+
+    let constrained = inner_content
+        .delimited_by(just(Token::Underscore), just(Token::Underscore))
+        .map_with(move |inlines: Vec<InlineNode<'src>>, e| {
+            let span: SourceSpan = e.span();
+            InlineNode::Span(SpanNode {
+                variant: "emphasis",
+                form: "constrained",
+                inlines,
+                location: Some(idx.location(&span)),
+            })
+        });
+
+    (unconstrained, constrained)
+}
+
 /// Build a recursive chumsky parser for inline content.
 ///
 /// The parser produces `Vec<InlineNode>` from a token stream, using the source
@@ -115,7 +167,12 @@ where
     // available for the closing delimiter.
     let single_inline = recursive(|single_inline| {
         let text_run = any()
-            .filter(|t: &Token| !matches!(t, Token::Star | Token::Backslash | Token::Backtick))
+            .filter(|t: &Token| {
+                !matches!(
+                    t,
+                    Token::Star | Token::Backslash | Token::Backtick | Token::Underscore
+                )
+            })
             .repeated()
             .at_least(1)
             .map_with(move |_toks, e| {
@@ -130,6 +187,7 @@ where
 
         // Constrained strong: *inline_content*
         let inner_content = single_inline
+            .clone()
             .repeated()
             .at_least(1)
             .collect::<Vec<InlineNode<'src>>>();
@@ -147,6 +205,8 @@ where
             });
 
         let (code_unconstrained, code_constrained) = code_span_parsers(source, idx);
+        let (emphasis_unconstrained, emphasis_constrained) =
+            emphasis_span_parsers(single_inline, idx);
 
         let backslash_as_text = just(Token::Backslash).map_with(move |_tok, e| {
             let span: SourceSpan = e.span();
@@ -160,6 +220,8 @@ where
             strong,
             code_unconstrained,
             code_constrained,
+            emphasis_unconstrained,
+            emphasis_constrained,
             escaped,
             text_run,
             backslash_as_text,
@@ -186,6 +248,16 @@ where
         })
     });
 
+    // Lone underscore fallback: a `_` that doesn't start an emphasis span is
+    // treated as literal text. This is only available at the top level.
+    let underscore_as_text = just(Token::Underscore).map_with(move |_tok, e| {
+        let span: SourceSpan = e.span();
+        InlineNode::Text(TextNode {
+            value: &source[span.start..span.end],
+            location: Some(idx.location(&span)),
+        })
+    });
+
     // Catch-all recovery: if all grammar branches fail on a token, consume
     // it as a text node. This emits the original parse error as a diagnostic
     // and lets `.repeated()` continue with the next token.
@@ -197,11 +269,16 @@ where
         })
     });
 
-    choice((single_inline, star_as_text, backtick_as_text))
-        .recover_with(via_parser(catch_all))
-        .repeated()
-        .at_least(1)
-        .collect()
+    choice((
+        single_inline,
+        star_as_text,
+        backtick_as_text,
+        underscore_as_text,
+    ))
+    .recover_with(via_parser(catch_all))
+    .repeated()
+    .at_least(1)
+    .collect()
 }
 
 /// Run the chumsky inline parser on a token sub-slice without text merging.
