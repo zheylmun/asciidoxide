@@ -98,6 +98,7 @@ pub fn parse_inlines(input: &str) -> (Vec<InlineNode<'_>>, Vec<ParseDiagnostic>)
 /// is only available at the top level — inside delimited spans (e.g., `*…*`)
 /// a `Star` token is never consumed as literal text, allowing `delimited_by`
 /// to match the closing delimiter.
+#[allow(clippy::too_many_lines)]
 fn inline_parser<'tokens, 'src: 'tokens, I>(
     source: &'src str,
     idx: &'tokens SourceIndex,
@@ -111,10 +112,10 @@ where
     // `star_as_text`, so a `Star` token inside a delimited span remains
     // available for the closing delimiter.
     let single_inline = recursive(|single_inline| {
-        // A text run: one or more tokens that are not `Star` or `Backslash`.
-        // Backslash is excluded so the `escaped` combinator gets priority.
+        // A text run: one or more tokens that are not span delimiters or `Backslash`.
+        // Excluded tokens are handled by dedicated parsers.
         let text_run = any()
-            .filter(|t: &Token| !matches!(t, Token::Star | Token::Backslash))
+            .filter(|t: &Token| !matches!(t, Token::Star | Token::Backslash | Token::Backtick))
             .repeated()
             .at_least(1)
             .map_with(move |_toks, e| {
@@ -161,6 +162,48 @@ where
                 })
             });
 
+        // Code spans use verbatim content (no nested formatting).
+        let code_content = any()
+            .filter(|t: &Token| !matches!(t, Token::Backtick))
+            .repeated()
+            .at_least(1)
+            .map_with(move |_toks, e| {
+                let span: SourceSpan = e.span();
+                vec![InlineNode::Text(TextNode {
+                    value: &source[span.start..span.end],
+                    location: Some(idx.location(&span)),
+                })]
+            });
+
+        // Unconstrained code: ``content`` (double backtick, tried first).
+        let code_unconstrained = code_content
+            .delimited_by(
+                just(Token::Backtick).then(just(Token::Backtick)),
+                just(Token::Backtick).then(just(Token::Backtick)),
+            )
+            .map_with(move |inlines: Vec<InlineNode<'src>>, e| {
+                let span: SourceSpan = e.span();
+                InlineNode::Span(SpanNode {
+                    variant: "code",
+                    form: "unconstrained",
+                    inlines,
+                    location: Some(idx.location(&span)),
+                })
+            });
+
+        // Constrained code: `content` (single backtick).
+        let code_constrained = code_content
+            .delimited_by(just(Token::Backtick), just(Token::Backtick))
+            .map_with(move |inlines: Vec<InlineNode<'src>>, e| {
+                let span: SourceSpan = e.span();
+                InlineNode::Span(SpanNode {
+                    variant: "code",
+                    form: "constrained",
+                    inlines,
+                    location: Some(idx.location(&span)),
+                })
+            });
+
         // Literal backslash: a `\` not followed by a span delimiter.
         let backslash_as_text = just(Token::Backslash).map_with(move |_tok, e| {
             let span: SourceSpan = e.span();
@@ -170,12 +213,29 @@ where
             })
         });
 
-        choice((strong, escaped, text_run, backslash_as_text))
+        choice((
+            strong,
+            code_unconstrained,
+            code_constrained,
+            escaped,
+            text_run,
+            backslash_as_text,
+        ))
     });
 
     // Lone star fallback: a `*` that doesn't start a strong span is treated
     // as literal text. This is only available at the top level.
     let star_as_text = just(Token::Star).map_with(move |_tok, e| {
+        let span: SourceSpan = e.span();
+        InlineNode::Text(TextNode {
+            value: &source[span.start..span.end],
+            location: Some(idx.location(&span)),
+        })
+    });
+
+    // Lone backtick fallback: a `` ` `` that doesn't start a code span is
+    // treated as literal text. This is only available at the top level.
+    let backtick_as_text = just(Token::Backtick).map_with(move |_tok, e| {
         let span: SourceSpan = e.span();
         InlineNode::Text(TextNode {
             value: &source[span.start..span.end],
@@ -194,7 +254,7 @@ where
         })
     });
 
-    choice((single_inline, star_as_text))
+    choice((single_inline, star_as_text, backtick_as_text))
         .recover_with(via_parser(catch_all))
         .repeated()
         .at_least(1)
