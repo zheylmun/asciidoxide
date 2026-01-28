@@ -93,6 +93,58 @@ where
     (unconstrained, constrained)
 }
 
+/// Parsers for inline strong spans: unconstrained (`**strong**`) and
+/// constrained (`*strong*`). Strong content supports nested formatting.
+///
+/// Returns `(unconstrained, constrained)` — unconstrained must be tried first
+/// so that double-star delimiters are not consumed as two single stars.
+fn strong_span_parsers<'tokens, 'src: 'tokens, I, P>(
+    inner: P,
+    idx: &'tokens SourceIndex,
+) -> (
+    impl Parser<'tokens, I, InlineNode<'src>, ParseExtra<'tokens, 'src>> + Clone + 'tokens,
+    impl Parser<'tokens, I, InlineNode<'src>, ParseExtra<'tokens, 'src>> + Clone + 'tokens,
+)
+where
+    I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
+    P: Parser<'tokens, I, InlineNode<'src>, ParseExtra<'tokens, 'src>> + Clone + 'tokens,
+{
+    let inner_content = inner
+        .repeated()
+        .at_least(1)
+        .collect::<Vec<InlineNode<'src>>>();
+
+    let unconstrained = inner_content
+        .clone()
+        .delimited_by(
+            just(Token::Star).then(just(Token::Star)),
+            just(Token::Star).then(just(Token::Star)),
+        )
+        .map_with(move |inlines: Vec<InlineNode<'src>>, e| {
+            let span: SourceSpan = e.span();
+            InlineNode::Span(SpanNode {
+                variant: "strong",
+                form: "unconstrained",
+                inlines,
+                location: Some(idx.location(&span)),
+            })
+        });
+
+    let constrained = inner_content
+        .delimited_by(just(Token::Star), just(Token::Star))
+        .map_with(move |inlines: Vec<InlineNode<'src>>, e| {
+            let span: SourceSpan = e.span();
+            InlineNode::Span(SpanNode {
+                variant: "strong",
+                form: "constrained",
+                inlines,
+                location: Some(idx.location(&span)),
+            })
+        });
+
+    (unconstrained, constrained)
+}
+
 /// Parsers for inline emphasis spans: unconstrained (`__emphasis__`) and
 /// constrained (`_emphasis_`). Emphasis content supports nested formatting.
 ///
@@ -257,25 +309,8 @@ where
 
         let escaped = escaped_delimiter_parser(source, idx);
 
-        // Constrained strong: *inline_content*
-        let inner_content = single_inline
-            .clone()
-            .repeated()
-            .at_least(1)
-            .collect::<Vec<InlineNode<'src>>>();
-
-        let strong = inner_content
-            .delimited_by(just(Token::Star), just(Token::Star))
-            .map_with(move |inlines: Vec<InlineNode<'src>>, e| {
-                let span: SourceSpan = e.span();
-                InlineNode::Span(SpanNode {
-                    variant: "strong",
-                    form: "constrained",
-                    inlines,
-                    location: Some(idx.location(&span)),
-                })
-            });
-
+        let (strong_unconstrained, strong_constrained) =
+            strong_span_parsers(single_inline.clone(), idx);
         let (code_unconstrained, code_constrained) = code_span_parsers(source, idx);
         let (emphasis_unconstrained, emphasis_constrained) =
             emphasis_span_parsers(single_inline.clone(), idx);
@@ -292,7 +327,8 @@ where
             });
 
         choice((
-            strong,
+            strong_unconstrained,
+            strong_constrained,
             code_unconstrained,
             code_constrained,
             emphasis_unconstrained,

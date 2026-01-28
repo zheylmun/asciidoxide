@@ -302,7 +302,10 @@ def walk_document(node)
     result['header'] = header
   end
 
-  result['blocks'] = node.blocks.map { |b| walk_block(b) }
+  result['blocks'] = node.blocks.flat_map { |b|
+    r = walk_block(b)
+    r.is_a?(Array) ? r : [r]
+  }
   result
 end
 

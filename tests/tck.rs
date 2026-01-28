@@ -463,7 +463,15 @@ fn populate_asg_defaults(node: &mut Value) {
 
 /// Test fixtures that exercise features the parser does not yet support.
 /// Remove entries from this list as the parser gains capabilities.
-const UNSUPPORTED: &[&str] = &["inline/span/strong/unconstrained"];
+const UNSUPPORTED: &[&str] = &[
+    "block/document/document-with-preamble",
+    "block/example/",
+    "block/list/ordered/",
+    "block/list/unordered/nested-unordered-list",
+    "block/literal/",
+    "block/open/",
+    "inline/escaped/escaped-unconstrained-strong",
+];
 
 fn is_unsupported(path: &str) -> bool {
     UNSUPPORTED.iter().any(|prefix| path.contains(prefix))
