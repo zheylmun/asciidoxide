@@ -352,12 +352,114 @@ fn try_break<'src>(
     None
 }
 
+/// Check whether position `i` starts a line comment (`//`).
+///
+/// A line comment starts with 2 `Slash` tokens and continues to end of line.
+/// Returns `Some(next_index)` pointing past the newline if matched.
+fn is_line_comment(tokens: &[Spanned<'_>], i: usize) -> Option<usize> {
+    if i + 1 >= tokens.len() {
+        return None;
+    }
+    // Must be exactly 2 Slash tokens (not 4+ which is block comment).
+    if !matches!(tokens[i].0, Token::Slash) || !matches!(tokens[i + 1].0, Token::Slash) {
+        return None;
+    }
+    // Check it's not a block comment (4+ slashes).
+    if i + 3 < tokens.len()
+        && matches!(tokens[i + 2].0, Token::Slash)
+        && matches!(tokens[i + 3].0, Token::Slash)
+    {
+        return None;
+    }
+    // Skip to end of line.
+    let mut j = i + 2;
+    while j < tokens.len() && !matches!(tokens[j].0, Token::Newline) {
+        j += 1;
+    }
+    if j < tokens.len() {
+        j += 1;
+    }
+    Some(j)
+}
+
+/// Check whether position `i` starts a block comment delimiter (`////`).
+///
+/// A block comment delimiter is 4 or more consecutive `Slash` tokens on their own line.
+/// Returns `Some(next_index)` past the newline if matched.
+fn is_block_comment_delimiter(tokens: &[Spanned<'_>], i: usize) -> Option<usize> {
+    if i + 3 >= tokens.len() {
+        return None;
+    }
+    let mut j = i;
+    while j < tokens.len() && matches!(tokens[j].0, Token::Slash) {
+        j += 1;
+    }
+    if j - i < 4 {
+        return None;
+    }
+    // Must be followed by Newline or be at end-of-tokens.
+    if j < tokens.len() && !matches!(tokens[j].0, Token::Newline) {
+        return None;
+    }
+    if j < tokens.len() {
+        j += 1;
+    }
+    Some(j)
+}
+
+/// Try to skip a block comment at position `i`.
+///
+/// Block comments are delimited by `////` (4+ slashes) and are completely skipped
+/// from the ASG output. Returns `Some(next_index)` past the closing delimiter.
+fn try_skip_block_comment(tokens: &[Spanned<'_>], i: usize) -> Option<usize> {
+    let content_start = is_block_comment_delimiter(tokens, i)?;
+
+    // Count opening slashes to match against the closing delimiter.
+    let mut delim_end = i;
+    while delim_end < tokens.len() && matches!(tokens[delim_end].0, Token::Slash) {
+        delim_end += 1;
+    }
+    let open_count = delim_end - i;
+
+    // Scan line-by-line for a matching closing delimiter.
+    let mut j = content_start;
+    loop {
+        if j >= tokens.len() {
+            return None;
+        }
+        if let Some(after_close) = is_block_comment_delimiter(tokens, j) {
+            let mut k = j;
+            while k < tokens.len() && matches!(tokens[k].0, Token::Slash) {
+                k += 1;
+            }
+            if k - j == open_count {
+                return Some(after_close);
+            }
+        }
+        // Advance to the next line.
+        while j < tokens.len() && !matches!(tokens[j].0, Token::Newline) {
+            j += 1;
+        }
+        if j < tokens.len() {
+            j += 1;
+        }
+    }
+}
+
+/// Result of parsing a block attribute line.
+struct BlockAttributeResult {
+    /// Index past the attribute line (past the Newline if present).
+    next: usize,
+    /// Whether this is a `[comment]` attribute.
+    is_comment: bool,
+}
+
 /// Check whether position `i` starts a block attribute line.
 ///
 /// A block attribute line is `[` ... `]` on its own line (followed by `Newline`
-/// or end-of-tokens). Returns the index past the attribute line (past the
-/// `Newline` if present).
-fn is_block_attribute_line(tokens: &[Spanned<'_>], i: usize) -> Option<usize> {
+/// or end-of-tokens). Returns information about the attribute including whether
+/// it's a comment.
+fn is_block_attribute_line(tokens: &[Spanned<'_>], i: usize) -> Option<BlockAttributeResult> {
     if i >= tokens.len() || !matches!(tokens[i].0, Token::LBracket) {
         return None;
     }
@@ -373,6 +475,9 @@ fn is_block_attribute_line(tokens: &[Spanned<'_>], i: usize) -> Option<usize> {
     if j >= tokens.len() || !matches!(tokens[j].0, Token::RBracket) {
         return None;
     }
+
+    // Check if content is "comment".
+    let is_comment = j == i + 2 && matches!(&tokens[i + 1].0, Token::Text(s) if *s == "comment");
     j += 1;
     // Must be followed by Newline or be at end-of-tokens.
     if j < tokens.len() && !matches!(tokens[j].0, Token::Newline) {
@@ -381,7 +486,95 @@ fn is_block_attribute_line(tokens: &[Spanned<'_>], i: usize) -> Option<usize> {
     if j < tokens.len() {
         j += 1;
     }
-    Some(j)
+    Some(BlockAttributeResult { next: j, is_comment })
+}
+
+/// Result of parsing a block title line.
+struct BlockTitleResult<'src> {
+    /// The title inline nodes.
+    inlines: Vec<InlineNode<'src>>,
+    /// Index past the title line (past the Newline if present).
+    next: usize,
+    /// Diagnostics from parsing the title.
+    diagnostics: Vec<ParseDiagnostic>,
+}
+
+/// Try to parse a block title at position `i`.
+///
+/// A block title is `.` followed by text on its own line. Returns the parsed
+/// title inlines and the index past the title line.
+fn try_block_title<'src>(
+    tokens: &[Spanned<'src>],
+    i: usize,
+    source: &'src str,
+    idx: &SourceIndex,
+) -> Option<BlockTitleResult<'src>> {
+    // Must start with a Dot.
+    if i >= tokens.len() || !matches!(tokens[i].0, Token::Dot) {
+        return None;
+    }
+
+    // Find end of line.
+    let content_start = i + 1;
+    let mut line_end = content_start;
+    while line_end < tokens.len() && !matches!(tokens[line_end].0, Token::Newline) {
+        line_end += 1;
+    }
+
+    // Must have content after the dot.
+    if content_start >= line_end {
+        return None;
+    }
+
+    // Parse the title content.
+    let title_tokens = &tokens[content_start..line_end];
+    let (inlines, diagnostics) = run_inline_parser(title_tokens, source, idx);
+
+    // Advance past the Newline if present.
+    let next = if line_end < tokens.len() {
+        line_end + 1
+    } else {
+        line_end
+    };
+
+    Some(BlockTitleResult {
+        inlines,
+        next,
+        diagnostics,
+    })
+}
+
+/// Skip a block following a `[comment]` attribute.
+///
+/// Returns the index past the skipped block content.
+fn skip_comment_block<'src>(
+    tokens: &[Spanned<'src>],
+    start: usize,
+    source: &'src str,
+    idx: &SourceIndex,
+) -> usize {
+    let mut i = start;
+
+    // Skip any newlines between attribute and block.
+    while i < tokens.len() && matches!(tokens[i].0, Token::Newline) {
+        i += 1;
+    }
+
+    // Skip the next block (delimited or paragraph).
+    if let Some((_, next, _)) = try_open(tokens, i, source, idx) {
+        next
+    } else if let Some((_, next)) = try_listing(tokens, i, source, idx) {
+        next
+    } else if let Some((_, next, _)) = try_sidebar(tokens, i, source, idx) {
+        next
+    } else if let Some((_, next, _)) = try_example(tokens, i, source, idx, None) {
+        next
+    } else if let Some(next) = try_skip_block_comment(tokens, i) {
+        next
+    } else {
+        // Skip paragraph content until blank line.
+        find_paragraph_end(tokens, i)
+    }
 }
 
 /// Build block-level ASG nodes from a body token stream.
@@ -397,6 +590,7 @@ pub(super) fn build_blocks<'src>(
     let mut blocks = Vec::new();
     let mut diagnostics = Vec::new();
     let mut i = 0;
+    let mut pending_title: Option<Vec<InlineNode<'src>>> = None;
 
     while i < tokens.len() {
         // Skip inter-block newlines.
@@ -407,17 +601,41 @@ pub(super) fn build_blocks<'src>(
             break;
         }
 
-        // Skip block attribute lines (e.g., [abstract], [source,ruby]).
-        // For now, we consume and discard them; a future enhancement could
-        // attach attributes to the following block.
-        if let Some(next) = is_block_attribute_line(tokens, i) {
+        // Skip line comments (// ...).
+        if let Some(next) = is_line_comment(tokens, i) {
             i = next;
+            continue;
+        }
+
+        // Skip block comments (////...////).
+        if let Some(next) = try_skip_block_comment(tokens, i) {
+            i = next;
+            continue;
+        }
+
+        // Handle block attribute lines (e.g., [abstract], [source,ruby], [comment]).
+        if let Some(attr) = is_block_attribute_line(tokens, i) {
+            i = attr.next;
+            // If [comment], skip the following block entirely.
+            if attr.is_comment {
+                i = skip_comment_block(tokens, i, source, idx);
+                pending_title = None;
+            }
+            continue;
+        }
+
+        // Try block title (.Title).
+        if let Some(title_result) = try_block_title(tokens, i, source, idx) {
+            pending_title = Some(title_result.inlines);
+            diagnostics.extend(title_result.diagnostics);
+            i = title_result.next;
             continue;
         }
 
         // Try break blocks (thematic or page).
         if let Some((block, next)) = try_break(tokens, i, idx) {
             blocks.push(block);
+            pending_title = None;
             i = next;
             continue;
         }
@@ -425,6 +643,16 @@ pub(super) fn build_blocks<'src>(
         // Try delimited listing block.
         if let Some((block, next)) = try_listing(tokens, i, source, idx) {
             blocks.push(block);
+            pending_title = None;
+            i = next;
+            continue;
+        }
+
+        // Try delimited example block.
+        if let Some((block, next, diags)) = try_example(tokens, i, source, idx, pending_title.take())
+        {
+            blocks.push(block);
+            diagnostics.extend(diags);
             i = next;
             continue;
         }
@@ -433,6 +661,7 @@ pub(super) fn build_blocks<'src>(
         if let Some((block, next, diags)) = try_sidebar(tokens, i, source, idx) {
             blocks.push(block);
             diagnostics.extend(diags);
+            pending_title = None;
             i = next;
             continue;
         }
@@ -441,6 +670,7 @@ pub(super) fn build_blocks<'src>(
         if let Some((block, next, diags)) = try_open(tokens, i, source, idx) {
             blocks.push(block);
             diagnostics.extend(diags);
+            pending_title = None;
             i = next;
             continue;
         }
@@ -449,6 +679,7 @@ pub(super) fn build_blocks<'src>(
         if let Some((block, next, diags)) = try_section(tokens, i, source, idx) {
             blocks.push(block);
             diagnostics.extend(diags);
+            pending_title = None;
             i = next;
             continue;
         }
@@ -457,6 +688,7 @@ pub(super) fn build_blocks<'src>(
         if let Some((block, next, diags)) = try_list(tokens, i, source, idx) {
             blocks.push(block);
             diagnostics.extend(diags);
+            pending_title = None;
             i = next;
             continue;
         }
@@ -468,6 +700,7 @@ pub(super) fn build_blocks<'src>(
             blocks.push(block);
             diagnostics.extend(diags);
         }
+        pending_title = None;
         i = para_end;
     }
 
@@ -497,9 +730,12 @@ fn find_paragraph_end(tokens: &[Spanned<'_>], start: usize) -> usize {
             // After a single newline, check if the next line starts a new block.
             if is_listing_delimiter(tokens, i).is_some()
                 || is_sidebar_delimiter(tokens, i).is_some()
+                || is_example_delimiter(tokens, i).is_some()
                 || is_open_delimiter(tokens, i).is_some()
                 || is_thematic_break(tokens, i).is_some()
                 || is_page_break(tokens, i).is_some()
+                || is_line_comment(tokens, i).is_some()
+                || is_block_comment_delimiter(tokens, i).is_some()
                 || is_list_item(tokens, i)
                 || is_section_heading(tokens, i).is_some()
             {
@@ -656,6 +892,120 @@ fn try_listing<'src>(
                 };
 
                 return Some((block, after_close));
+            }
+        }
+        // Advance to the next line.
+        while j < tokens.len() && !matches!(tokens[j].0, Token::Newline) {
+            j += 1;
+        }
+        if j < tokens.len() {
+            j += 1;
+        }
+    }
+}
+
+/// Check whether position `i` starts an example delimiter line.
+///
+/// An example delimiter is 4 or more consecutive `Eq` tokens with nothing
+/// else on the line (followed by `Newline` or end-of-tokens). Returns the
+/// index past the delimiter (past the `Newline` if present).
+fn is_example_delimiter(tokens: &[Spanned<'_>], i: usize) -> Option<usize> {
+    if i + 3 >= tokens.len() {
+        return None;
+    }
+    let mut j = i;
+    while j < tokens.len() && matches!(tokens[j].0, Token::Eq) {
+        j += 1;
+    }
+    if j - i < 4 {
+        return None;
+    }
+    // Must be followed by Newline or be at end-of-tokens.
+    if j < tokens.len() && !matches!(tokens[j].0, Token::Newline) {
+        return None;
+    }
+    if j < tokens.len() {
+        j += 1;
+    }
+    Some(j)
+}
+
+/// Try to parse a delimited example block starting at position `i`.
+///
+/// An example block uses `====` delimiters and has a compound content model — its
+/// content is recursively parsed through [`build_blocks`]. Returns `None` if
+/// no complete example block (opening **and** matching closing delimiter) is found.
+fn try_example<'src>(
+    tokens: &[Spanned<'src>],
+    i: usize,
+    source: &'src str,
+    idx: &SourceIndex,
+    title: Option<Vec<InlineNode<'src>>>,
+) -> Option<(Block<'src>, usize, Vec<ParseDiagnostic>)> {
+    let content_start = is_example_delimiter(tokens, i)?;
+
+    // Count opening equals to match against the closing delimiter.
+    let mut delim_end_tok = i;
+    while delim_end_tok < tokens.len() && matches!(tokens[delim_end_tok].0, Token::Eq) {
+        delim_end_tok += 1;
+    }
+    let open_eq_count = delim_end_tok - i;
+    let delimiter = &source[tokens[i].1.start..tokens[delim_end_tok - 1].1.end];
+
+    // Scan line-by-line for a matching closing delimiter.
+    let mut j = content_start;
+    loop {
+        if j >= tokens.len() {
+            return None;
+        }
+        if let Some(after_close) = is_example_delimiter(tokens, j) {
+            let mut k = j;
+            while k < tokens.len() && matches!(tokens[k].0, Token::Eq) {
+                k += 1;
+            }
+            if k - j == open_eq_count {
+                // Matching closing delimiter found.
+
+                // Content tokens: exclude the Newline before the closing delimiter.
+                let content_end = if j > content_start && matches!(tokens[j - 1].0, Token::Newline)
+                {
+                    j - 1
+                } else {
+                    j
+                };
+
+                // Recursively parse content as blocks.
+                let content_tokens = &tokens[content_start..content_end];
+                let (body_blocks, body_diags) = build_blocks(content_tokens, source, idx);
+
+                // Block location: opening delimiter through closing delimiter.
+                let block_span = SourceSpan {
+                    start: tokens[i].1.start,
+                    end: tokens[k - 1].1.end,
+                };
+
+                return Some((
+                    Block {
+                        name: "example",
+                        form: Some("delimited"),
+                        delimiter: Some(delimiter),
+                        id: None,
+                        style: None,
+                        reftext: None,
+                        metadata: None,
+                        title,
+                        level: None,
+                        variant: None,
+                        marker: None,
+                        inlines: None,
+                        blocks: Some(body_blocks),
+                        items: None,
+                        principal: None,
+                        location: Some(idx.location(&block_span)),
+                    },
+                    after_close,
+                    body_diags,
+                ));
             }
         }
         // Advance to the next line.
@@ -1329,5 +1679,63 @@ mod tests {
         assert_eq!(doc.blocks[1].name, "break");
         assert_eq!(doc.blocks[1].variant, Some("page"));
         assert_eq!(doc.blocks[2].name, "paragraph");
+    }
+
+    #[test]
+    fn doc_line_comment_skipped() {
+        let (doc, diags) = parse_doc("first\n\n// comment\n\nsecond");
+        assert!(diags.is_empty());
+        assert_eq!(doc.blocks.len(), 2);
+        assert_eq!(doc.blocks[0].name, "paragraph");
+        assert_eq!(doc.blocks[1].name, "paragraph");
+    }
+
+    #[test]
+    fn doc_block_comment_skipped() {
+        let (doc, diags) = parse_doc("first\n\n////\ncomment\n////\n\nsecond");
+        assert!(diags.is_empty());
+        assert_eq!(doc.blocks.len(), 2);
+        assert_eq!(doc.blocks[0].name, "paragraph");
+        assert_eq!(doc.blocks[1].name, "paragraph");
+    }
+
+    #[test]
+    fn doc_comment_style_paragraph_skipped() {
+        let (doc, diags) = parse_doc("[comment]\nskip this\n\nkeep this");
+        assert!(diags.is_empty());
+        assert_eq!(doc.blocks.len(), 1);
+        assert_eq!(doc.blocks[0].name, "paragraph");
+    }
+
+    #[test]
+    fn doc_example_block() {
+        let (doc, diags) = parse_doc("====\nThis is an example.\n====");
+        assert!(diags.is_empty());
+        assert_eq!(doc.blocks.len(), 1);
+        let example = &doc.blocks[0];
+        assert_eq!(example.name, "example");
+        assert_eq!(example.form, Some("delimited"));
+        assert_eq!(example.delimiter, Some("===="));
+        let blocks = example.blocks.as_ref().unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].name, "paragraph");
+        let loc = example.location.as_ref().unwrap();
+        assert_eq!(loc[0], Position { line: 1, col: 1 });
+        assert_eq!(loc[1], Position { line: 3, col: 4 });
+    }
+
+    #[test]
+    fn doc_example_block_with_title() {
+        let (doc, diags) = parse_doc(".My Example\n====\ncontent\n====");
+        assert!(diags.is_empty());
+        assert_eq!(doc.blocks.len(), 1);
+        let example = &doc.blocks[0];
+        assert_eq!(example.name, "example");
+        let title = example.title.as_ref().unwrap();
+        assert_eq!(title.len(), 1);
+        match &title[0] {
+            InlineNode::Text(t) => assert_eq!(t.value, "My Example"),
+            _ => panic!("expected Text"),
+        }
     }
 }
