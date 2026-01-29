@@ -24,7 +24,7 @@ struct JsonDocument<'a> {
     #[serde(rename = "type")]
     node_type: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    attributes: Option<HashMap<&'a str, &'a str>>,
+    attributes: Option<HashMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     header: Option<JsonHeader<'a>>,
     blocks: Vec<JsonBlock<'a>>,
@@ -37,7 +37,12 @@ impl<'a> From<&asg::Document<'a>> for JsonDocument<'a> {
         Self {
             name: "document",
             node_type: "block",
-            attributes: doc.attributes.clone(),
+            attributes: doc.attributes.as_ref().map(|attrs| {
+                attrs
+                    .iter()
+                    .map(|(k, v)| ((*k).to_string(), v.resolve().into_owned()))
+                    .collect()
+            }),
             header: doc.header.as_ref().map(JsonHeader::from),
             blocks: doc.blocks.iter().map(JsonBlock::from).collect(),
             location: doc.location.as_ref().map(convert_location),
@@ -499,7 +504,6 @@ fn populate_asg_defaults(node: &mut Value) {
 /// Test fixtures that exercise features the parser does not yet support.
 /// Remove entries from this list as the parser gains capabilities.
 const UNSUPPORTED: &[&str] = &[
-    "block/attributes/attribute-multiline-backslash",
     "block/attributes/attribute-multiline-legacy",
     "block/attributes/attribute-name-ends-colon",
     "block/attributes/attribute-substitution-in-value",

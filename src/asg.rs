@@ -1,6 +1,53 @@
 //! Abstract Semantic Graph (ASG) types produced by the parser.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
+
+/// An attribute value that may be single-line or multiline.
+///
+/// Stores references to source slices; allocation only happens when
+/// [`resolve()`](Self::resolve) is called on multiline values.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AttributeValue<'a> {
+    /// A single-line value (zero-copy slice from source).
+    Single(&'a str),
+    /// A multiline value with continuation lines.
+    ///
+    /// Each element is a line segment; when resolved, segments are joined
+    /// with a single space (backslash and leading whitespace removed).
+    Multiline(Vec<&'a str>),
+}
+
+impl<'a> AttributeValue<'a> {
+    /// Resolve the attribute value to a string.
+    ///
+    /// For single-line values, returns a borrowed reference (no allocation).
+    /// For multiline values, joins segments with spaces and returns an owned string.
+    #[must_use]
+    pub fn resolve(&self) -> Cow<'a, str> {
+        match self {
+            Self::Single(s) => Cow::Borrowed(s),
+            Self::Multiline(segments) => Cow::Owned(segments.join(" ")),
+        }
+    }
+
+    /// Returns the value as a `&str` if it's a single-line value.
+    ///
+    /// Returns `None` for multiline values (use [`resolve()`](Self::resolve) instead).
+    #[must_use]
+    pub fn as_str(&self) -> Option<&'a str> {
+        match self {
+            Self::Single(s) => Some(s),
+            Self::Multiline(_) => None,
+        }
+    }
+
+    /// Returns `true` if this is a multiline value.
+    #[must_use]
+    pub fn is_multiline(&self) -> bool {
+        matches!(self, Self::Multiline(_))
+    }
+}
 
 /// Block-level metadata (roles, options, element attributes).
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -29,7 +76,7 @@ pub type Location = [Position; 2];
 #[derive(Debug, Clone, PartialEq)]
 pub struct Document<'a> {
     /// Document-level attributes.
-    pub attributes: Option<HashMap<&'a str, &'a str>>,
+    pub attributes: Option<HashMap<&'a str, AttributeValue<'a>>>,
     /// Document header (title, authors, etc.).
     pub header: Option<Header<'a>>,
     /// Top-level blocks in the document body.

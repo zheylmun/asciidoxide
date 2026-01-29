@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use super::inline::run_inline_parser;
 use super::{Spanned, content_span, strip_trailing_newline_index, strip_trailing_newlines};
-use crate::asg::{Block, Header, InlineNode, TextNode};
+use crate::asg::{AttributeValue, Block, Header, InlineNode, TextNode};
 use crate::diagnostic::ParseDiagnostic;
 use crate::span::{SourceIndex, SourceSpan};
 use crate::token::Token;
@@ -17,7 +17,7 @@ pub(super) struct HeaderResult<'src> {
     pub(super) diagnostics: Vec<ParseDiagnostic>,
     /// Document attributes parsed from `:key: value` lines below the title.
     /// `Some` when a header is present (even if no attribute entries exist).
-    pub(super) attributes: Option<HashMap<&'src str, &'src str>>,
+    pub(super) attributes: Option<HashMap<&'src str, AttributeValue<'src>>>,
 }
 
 /// Check if an attribute name is valid per the `AsciiDoc` spec.
@@ -35,7 +35,10 @@ fn is_valid_attribute_name(name: &str) -> bool {
 /// Result of parsing an attribute entry.
 enum AttributeEntry<'src> {
     /// Set an attribute: `:key: value`
-    Set { key: &'src str, value: &'src str },
+    Set {
+        key: &'src str,
+        value: AttributeValue<'src>,
+    },
     /// Delete an attribute: `:!key:` or `:key!:`
     Delete { key: &'src str },
 }
@@ -49,6 +52,84 @@ enum AttributeEntry<'src> {
 /// - `:key!:` — delete attribute (bang suffix)
 ///
 /// Returns `Some((entry, next_index))` on success.
+/// Parse a multiline attribute value with backslash continuation.
+///
+/// `val_start` is the index of the first value token.
+/// `line_end` is the index of the Newline token (or end of tokens).
+/// Returns the parsed segments and the token index to continue from.
+fn parse_multiline_attribute_value<'src>(
+    tokens: &[Spanned<'src>],
+    val_start: usize,
+    line_end: usize,
+    source: &'src str,
+) -> (Vec<&'src str>, usize) {
+    let mut segments: Vec<&'src str> = Vec::new();
+
+    // Extract first segment (before the backslash).
+    let seg_end = line_end - 1; // Exclude the backslash
+    if val_start < seg_end {
+        let start = tokens[val_start].1.start;
+        let end = tokens[seg_end - 1].1.end;
+        let segment = &source[start..end];
+        // Trim trailing whitespace before backslash.
+        segments.push(segment.trim_end());
+    }
+
+    // Advance past newline to continuation line.
+    let mut pos = if line_end < tokens.len() {
+        line_end + 1
+    } else {
+        line_end
+    };
+
+    // Read continuation lines.
+    while pos < tokens.len() {
+        // Skip leading whitespace on continuation line.
+        if matches!(tokens[pos].0, Token::Whitespace) {
+            pos += 1;
+        }
+
+        // Find end of this line.
+        let cont_start = pos;
+        while pos < tokens.len() && !matches!(tokens[pos].0, Token::Newline) {
+            pos += 1;
+        }
+
+        // Check if this line also has continuation.
+        let line_has_continuation =
+            pos > cont_start && matches!(tokens[pos - 1].0, Token::Backslash);
+
+        if line_has_continuation {
+            // Extract segment before backslash.
+            let seg_end = pos - 1;
+            if cont_start < seg_end {
+                let start = tokens[cont_start].1.start;
+                let end = tokens[seg_end - 1].1.end;
+                let segment = &source[start..end];
+                segments.push(segment.trim_end());
+            }
+            // Advance past newline.
+            if pos < tokens.len() {
+                pos += 1;
+            }
+        } else {
+            // Final line (no continuation).
+            if cont_start < pos {
+                let start = tokens[cont_start].1.start;
+                let end = tokens[pos - 1].1.end;
+                segments.push(&source[start..end]);
+            }
+            // Advance past newline if present.
+            if pos < tokens.len() {
+                pos += 1;
+            }
+            break;
+        }
+    }
+
+    (segments, pos)
+}
+
 fn try_parse_attribute_entry<'src>(
     tokens: &[Spanned<'src>],
     i: usize,
@@ -133,29 +214,39 @@ fn try_parse_attribute_entry<'src>(
         val_start += 1;
     }
 
-    // Scan to Newline or end-of-tokens.
+    // Scan to Newline or end-of-tokens, collecting multiline segments if needed.
     let mut line_end = val_start;
     while line_end < tokens.len() && !matches!(tokens[line_end].0, Token::Newline) {
         line_end += 1;
     }
 
-    // Extract value via source slicing (zero-copy).
-    let value = if val_start < line_end {
-        let start = tokens[val_start].1.start;
-        let end = tokens[line_end - 1].1.end;
-        &source[start..end]
-    } else {
-        ""
-    };
+    // Check if line ends with backslash (continuation).
+    let has_continuation =
+        line_end > val_start && line_end >= 2 && matches!(tokens[line_end - 1].0, Token::Backslash);
 
-    // Advance past Newline (if present).
-    let next = if line_end < tokens.len() {
-        line_end + 1
+    if has_continuation {
+        let (segments, pos) = parse_multiline_attribute_value(tokens, val_start, line_end, source);
+        let value = AttributeValue::Multiline(segments);
+        Some((AttributeEntry::Set { key, value }, pos))
     } else {
-        line_end
-    };
+        // Single-line attribute value.
+        let value = if val_start < line_end {
+            let start = tokens[val_start].1.start;
+            let end = tokens[line_end - 1].1.end;
+            AttributeValue::Single(&source[start..end])
+        } else {
+            AttributeValue::Single("")
+        };
 
-    Some((AttributeEntry::Set { key, value }, next))
+        // Advance past Newline (if present).
+        let next = if line_end < tokens.len() {
+            line_end + 1
+        } else {
+            line_end
+        };
+
+        Some((AttributeEntry::Set { key, value }, next))
+    }
 }
 
 /// Detect a document header (`= Title`) at the start of the token stream.
@@ -304,7 +395,11 @@ fn is_thematic_break(tokens: &[Spanned<'_>], i: usize) -> Option<usize> {
     if j < tokens.len() && !matches!(tokens[j].0, Token::Newline) {
         return None;
     }
-    if j < tokens.len() { Some(j + 1) } else { Some(j) }
+    if j < tokens.len() {
+        Some(j + 1)
+    } else {
+        Some(j)
+    }
 }
 
 /// Check whether position `i` starts a page break (`<<<`).
@@ -327,7 +422,11 @@ fn is_page_break(tokens: &[Spanned<'_>], i: usize) -> Option<usize> {
     if j < tokens.len() && !matches!(tokens[j].0, Token::Newline) {
         return None;
     }
-    if j < tokens.len() { Some(j + 1) } else { Some(j) }
+    if j < tokens.len() {
+        Some(j + 1)
+    } else {
+        Some(j)
+    }
 }
 
 /// Try to parse a break block (thematic or page) at position `i`.
@@ -531,7 +630,10 @@ fn is_block_attribute_line(tokens: &[Spanned<'_>], i: usize) -> Option<BlockAttr
     if j < tokens.len() {
         j += 1;
     }
-    Some(BlockAttributeResult { next: j, is_comment })
+    Some(BlockAttributeResult {
+        next: j,
+        is_comment,
+    })
 }
 
 /// Result of parsing a block title line.
@@ -702,7 +804,8 @@ pub(super) fn build_blocks<'src>(
         }
 
         // Try delimited example block.
-        if let Some((block, next, diags)) = try_example(tokens, i, source, idx, pending_title.take())
+        if let Some((block, next, diags)) =
+            try_example(tokens, i, source, idx, pending_title.take())
         {
             blocks.push(block);
             diagnostics.extend(diags);
@@ -1821,7 +1924,10 @@ mod tests {
         assert!(doc.header.is_none());
         assert!(doc.blocks.is_empty());
         let attrs = doc.attributes.as_ref().expect("should have attributes");
-        assert_eq!(attrs.get("frog"), Some(&"Tanglefoot"));
+        assert_eq!(
+            attrs.get("frog"),
+            Some(&crate::asg::AttributeValue::Single("Tanglefoot"))
+        );
         let loc = doc.location.as_ref().unwrap();
         assert_eq!(loc[0], Position { line: 1, col: 1 });
         assert_eq!(loc[1], Position { line: 1, col: 17 });
