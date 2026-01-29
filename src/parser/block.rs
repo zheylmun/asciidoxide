@@ -239,6 +239,119 @@ pub(super) fn extract_header<'src>(
     }
 }
 
+/// Check whether position `i` starts a thematic break (`'''`).
+///
+/// A thematic break is exactly 3 `SingleQuote` tokens on their own line.
+/// Returns `Some(next_index)` if matched.
+fn is_thematic_break(tokens: &[Spanned<'_>], i: usize) -> Option<usize> {
+    if i + 2 >= tokens.len() {
+        return None;
+    }
+    // Must be exactly 3 SingleQuote tokens.
+    if !matches!(tokens[i].0, Token::SingleQuote)
+        || !matches!(tokens[i + 1].0, Token::SingleQuote)
+        || !matches!(tokens[i + 2].0, Token::SingleQuote)
+    {
+        return None;
+    }
+    let j = i + 3;
+    // Must be followed by Newline or be at end-of-tokens.
+    if j < tokens.len() && !matches!(tokens[j].0, Token::Newline) {
+        return None;
+    }
+    if j < tokens.len() { Some(j + 1) } else { Some(j) }
+}
+
+/// Check whether position `i` starts a page break (`<<<`).
+///
+/// A page break is `DoubleLeftAngle` followed by `Text("<")` on its own line.
+/// Returns `Some(next_index)` if matched.
+fn is_page_break(tokens: &[Spanned<'_>], i: usize) -> Option<usize> {
+    if i + 1 >= tokens.len() {
+        return None;
+    }
+    // Must be DoubleLeftAngle followed by Text("<").
+    if !matches!(tokens[i].0, Token::DoubleLeftAngle) {
+        return None;
+    }
+    if !matches!(&tokens[i + 1].0, Token::Text(s) if *s == "<") {
+        return None;
+    }
+    let j = i + 2;
+    // Must be followed by Newline or be at end-of-tokens.
+    if j < tokens.len() && !matches!(tokens[j].0, Token::Newline) {
+        return None;
+    }
+    if j < tokens.len() { Some(j + 1) } else { Some(j) }
+}
+
+/// Try to parse a break block (thematic or page) at position `i`.
+fn try_break<'src>(
+    tokens: &[Spanned<'src>],
+    i: usize,
+    idx: &SourceIndex,
+) -> Option<(Block<'src>, usize)> {
+    // Try thematic break (''')
+    if let Some(next) = is_thematic_break(tokens, i) {
+        let span = SourceSpan {
+            start: tokens[i].1.start,
+            end: tokens[i + 2].1.end,
+        };
+        return Some((
+            Block {
+                name: "break",
+                form: None,
+                delimiter: None,
+                id: None,
+                style: None,
+                reftext: None,
+                metadata: None,
+                title: None,
+                level: None,
+                variant: Some("thematic"),
+                marker: None,
+                inlines: None,
+                blocks: None,
+                items: None,
+                principal: None,
+                location: Some(idx.location(&span)),
+            },
+            next,
+        ));
+    }
+
+    // Try page break (<<<)
+    if let Some(next) = is_page_break(tokens, i) {
+        let span = SourceSpan {
+            start: tokens[i].1.start,
+            end: tokens[i + 1].1.end,
+        };
+        return Some((
+            Block {
+                name: "break",
+                form: None,
+                delimiter: None,
+                id: None,
+                style: None,
+                reftext: None,
+                metadata: None,
+                title: None,
+                level: None,
+                variant: Some("page"),
+                marker: None,
+                inlines: None,
+                blocks: None,
+                items: None,
+                principal: None,
+                location: Some(idx.location(&span)),
+            },
+            next,
+        ));
+    }
+
+    None
+}
+
 /// Check whether position `i` starts a block attribute line.
 ///
 /// A block attribute line is `[` ... `]` on its own line (followed by `Newline`
@@ -298,6 +411,13 @@ pub(super) fn build_blocks<'src>(
         // For now, we consume and discard them; a future enhancement could
         // attach attributes to the following block.
         if let Some(next) = is_block_attribute_line(tokens, i) {
+            i = next;
+            continue;
+        }
+
+        // Try break blocks (thematic or page).
+        if let Some((block, next)) = try_break(tokens, i, idx) {
+            blocks.push(block);
             i = next;
             continue;
         }
@@ -378,6 +498,8 @@ fn find_paragraph_end(tokens: &[Spanned<'_>], start: usize) -> usize {
             if is_listing_delimiter(tokens, i).is_some()
                 || is_sidebar_delimiter(tokens, i).is_some()
                 || is_open_delimiter(tokens, i).is_some()
+                || is_thematic_break(tokens, i).is_some()
+                || is_page_break(tokens, i).is_some()
                 || is_list_item(tokens, i)
                 || is_section_heading(tokens, i).is_some()
             {
@@ -1183,5 +1305,29 @@ mod tests {
         assert!(doc.attributes.is_none());
         assert_eq!(doc.blocks.len(), 1);
         assert_eq!(doc.blocks[0].name, "paragraph");
+    }
+
+    #[test]
+    fn doc_thematic_break() {
+        let (doc, diags) = parse_doc("'''");
+        assert!(diags.is_empty());
+        assert_eq!(doc.blocks.len(), 1);
+        let br = &doc.blocks[0];
+        assert_eq!(br.name, "break");
+        assert_eq!(br.variant, Some("thematic"));
+        let loc = br.location.as_ref().unwrap();
+        assert_eq!(loc[0], Position { line: 1, col: 1 });
+        assert_eq!(loc[1], Position { line: 1, col: 3 });
+    }
+
+    #[test]
+    fn doc_page_break() {
+        let (doc, diags) = parse_doc("page 1\n\n<<<\n\npage 2");
+        assert!(diags.is_empty());
+        assert_eq!(doc.blocks.len(), 3);
+        assert_eq!(doc.blocks[0].name, "paragraph");
+        assert_eq!(doc.blocks[1].name, "break");
+        assert_eq!(doc.blocks[1].variant, Some("page"));
+        assert_eq!(doc.blocks[2].name, "paragraph");
     }
 }

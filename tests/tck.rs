@@ -505,7 +505,6 @@ const UNSUPPORTED: &[&str] = &[
     "block/attributes/attribute-multiline-legacy",
     "block/attributes/attribute-name-ends-colon",
     "block/attributes/attribute-substitution-in-value",
-    "block/break/",
     "block/comment/",
     "block/document/document-no-doctitle",
     "block/document/document-with-preamble",
