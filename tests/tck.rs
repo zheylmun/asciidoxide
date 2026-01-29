@@ -499,8 +499,6 @@ fn populate_asg_defaults(node: &mut Value) {
 /// Test fixtures that exercise features the parser does not yet support.
 /// Remove entries from this list as the parser gains capabilities.
 const UNSUPPORTED: &[&str] = &[
-    "block/attributes/attribute-delete-bang-prefix",
-    "block/attributes/attribute-delete-bang-suffix",
     "block/attributes/attribute-multiline-backslash",
     "block/attributes/attribute-multiline-legacy",
     "block/attributes/attribute-name-ends-colon",

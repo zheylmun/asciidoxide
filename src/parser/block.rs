@@ -32,15 +32,28 @@ fn is_valid_attribute_name(name: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
+/// Result of parsing an attribute entry.
+enum AttributeEntry<'src> {
+    /// Set an attribute: `:key: value`
+    Set { key: &'src str, value: &'src str },
+    /// Delete an attribute: `:!key:` or `:key!:`
+    Delete { key: &'src str },
+}
+
 /// Try to parse a single attribute entry at position `i`.
 ///
-/// Pattern: `Colon Text Colon [Whitespace value...] Newline`
-/// Returns `Some((key, value, next_index))` on success.
+/// Patterns:
+/// - `:key: value` — set attribute
+/// - `:key:` — set attribute to empty string
+/// - `:!key:` — delete attribute (bang prefix)
+/// - `:key!:` — delete attribute (bang suffix)
+///
+/// Returns `Some((entry, next_index))` on success.
 fn try_parse_attribute_entry<'src>(
     tokens: &[Spanned<'src>],
     i: usize,
     source: &'src str,
-) -> Option<(&'src str, &'src str, usize)> {
+) -> Option<(AttributeEntry<'src>, usize)> {
     if i + 2 >= tokens.len() {
         return None;
     }
@@ -48,23 +61,64 @@ fn try_parse_attribute_entry<'src>(
         return None;
     }
 
-    let key = match &tokens[i + 1].0 {
-        Token::Text(s) => *s,
-        _ => return None,
+    // Check for bang-prefix deletion: `:!key:`
+    let (key, is_delete, key_end) = if matches!(tokens[i + 1].0, Token::Bang) {
+        // Need at least 4 tokens: Colon Bang Text Colon
+        if i + 3 >= tokens.len() {
+            return None;
+        }
+        let key = match &tokens[i + 2].0 {
+            Token::Text(s) => *s,
+            _ => return None,
+        };
+        if !is_valid_attribute_name(key) {
+            return None;
+        }
+        if !matches!(tokens[i + 3].0, Token::Colon) {
+            return None;
+        }
+        (key, true, i + 4)
+    } else {
+        // Regular or bang-suffix: `:key:` or `:key!:`
+        let key = match &tokens[i + 1].0 {
+            Token::Text(s) => *s,
+            _ => return None,
+        };
+        if !is_valid_attribute_name(key) {
+            return None;
+        }
+
+        // Check for bang-suffix: `:key!:`
+        if matches!(tokens[i + 2].0, Token::Bang) {
+            if i + 3 >= tokens.len() || !matches!(tokens[i + 3].0, Token::Colon) {
+                return None;
+            }
+            (key, true, i + 4)
+        } else if matches!(tokens[i + 2].0, Token::Colon) {
+            (key, false, i + 3)
+        } else {
+            return None;
+        }
     };
 
-    if !is_valid_attribute_name(key) {
-        return None;
-    }
-
-    if !matches!(tokens[i + 2].0, Token::Colon) {
-        return None;
+    // For deletions, just need to reach end of line
+    if is_delete {
+        // Must be followed by Newline or end-of-tokens
+        if key_end < tokens.len() && !matches!(tokens[key_end].0, Token::Newline) {
+            return None;
+        }
+        let next = if key_end < tokens.len() {
+            key_end + 1
+        } else {
+            key_end
+        };
+        return Some((AttributeEntry::Delete { key }, next));
     }
 
     // After the second colon, must have:
     // - Newline or end-of-tokens (empty value)
     // - Whitespace followed by value
-    let after_colon = i + 3;
+    let after_colon = key_end;
     if after_colon < tokens.len()
         && !matches!(tokens[after_colon].0, Token::Newline)
         && !matches!(tokens[after_colon].0, Token::Whitespace)
@@ -101,7 +155,7 @@ fn try_parse_attribute_entry<'src>(
         line_end
     };
 
-    Some((key, value, next))
+    Some((AttributeEntry::Set { key, value }, next))
 }
 
 /// Detect a document header (`= Title`) at the start of the token stream.
@@ -142,55 +196,25 @@ pub(super) fn extract_header<'src>(
                 title_end
             };
 
-            // Parse attribute entry lines: `:key: value` or `:key:`
+            // Parse attribute entry lines using the shared parser.
             let mut attributes = HashMap::new();
-            while i + 2 < tokens.len()
-                && matches!(tokens[i].0, Token::Colon)
-                && matches!(tokens[i + 1].0, Token::Text(_))
-                && matches!(tokens[i + 2].0, Token::Colon)
-            {
-                let key = match &tokens[i + 1].0 {
-                    Token::Text(s) => *s,
-                    _ => unreachable!(),
-                };
-
-                // Skip optional whitespace after second colon.
-                let mut val_start = i + 3;
-                if val_start < tokens.len() && matches!(tokens[val_start].0, Token::Whitespace) {
-                    val_start += 1;
-                }
-
-                // Scan to Newline or end-of-tokens.
-                let mut line_end = val_start;
-                while line_end < tokens.len() && !matches!(tokens[line_end].0, Token::Newline) {
-                    line_end += 1;
-                }
-
-                // Extract value via source slicing (zero-copy).
-                let value = if val_start < line_end {
-                    let start = tokens[val_start].1.start;
-                    let end = tokens[line_end - 1].1.end;
-                    &source[start..end]
-                } else {
-                    ""
-                };
-
-                attributes.insert(key, value);
-
+            while let Some((entry, next)) = try_parse_attribute_entry(tokens, i, source) {
                 // Update header span end to last content token on this line.
-                let last_content = if line_end > val_start {
-                    line_end - 1
-                } else {
-                    i + 2
-                };
-                span_end = tokens[last_content].1.end;
+                span_end = tokens[next - 1].1.end;
+                if next > 0 && matches!(tokens[next - 1].0, Token::Newline) {
+                    // Span end should be the token before the newline.
+                    span_end = tokens[next - 2].1.end;
+                }
 
-                // Advance past Newline (if present).
-                i = if line_end < tokens.len() {
-                    line_end + 1
-                } else {
-                    line_end
-                };
+                match entry {
+                    AttributeEntry::Set { key, value } => {
+                        attributes.insert(key, value);
+                    }
+                    AttributeEntry::Delete { key } => {
+                        attributes.remove(key);
+                    }
+                }
+                i = next;
             }
 
             let header_span = SourceSpan {
@@ -213,21 +237,42 @@ pub(super) fn extract_header<'src>(
     }
 
     // Second, check for body-only attribute entries (no title).
-    if let Some((key, value, mut next)) = try_parse_attribute_entry(tokens, 0, source) {
+    if let Some((entry, mut next)) = try_parse_attribute_entry(tokens, 0, source) {
         let mut attributes = HashMap::new();
-        attributes.insert(key, value);
+        match entry {
+            AttributeEntry::Set { key, value } => {
+                attributes.insert(key, value);
+            }
+            AttributeEntry::Delete { key } => {
+                attributes.remove(key);
+            }
+        }
 
         // Continue parsing additional attribute entries.
-        while let Some((k, v, n)) = try_parse_attribute_entry(tokens, next, source) {
-            attributes.insert(k, v);
+        while let Some((e, n)) = try_parse_attribute_entry(tokens, next, source) {
+            match e {
+                AttributeEntry::Set { key, value } => {
+                    attributes.insert(key, value);
+                }
+                AttributeEntry::Delete { key } => {
+                    attributes.remove(key);
+                }
+            }
             next = n;
         }
+
+        // Only return attributes if there are any remaining after deletions.
+        let attrs = if attributes.is_empty() {
+            None
+        } else {
+            Some(attributes)
+        };
 
         return HeaderResult {
             header: None,
             body_start: next,
             diagnostics: Vec::new(),
-            attributes: Some(attributes),
+            attributes: attrs,
         };
     }
 
@@ -1645,6 +1690,26 @@ mod tests {
         let loc = doc.location.as_ref().unwrap();
         assert_eq!(loc[0], Position { line: 1, col: 1 });
         assert_eq!(loc[1], Position { line: 1, col: 17 });
+    }
+
+    #[test]
+    fn doc_attribute_delete_bang_prefix() {
+        let (doc, diags) = parse_doc(":frog: Tanglefoot\n:!frog:");
+        assert!(diags.is_empty());
+        assert!(doc.header.is_none());
+        assert!(doc.blocks.is_empty());
+        // Attribute was set then deleted, so no attributes remain.
+        assert!(doc.attributes.is_none());
+    }
+
+    #[test]
+    fn doc_attribute_delete_bang_suffix() {
+        let (doc, diags) = parse_doc(":frog: Tanglefoot\n:frog!:");
+        assert!(diags.is_empty());
+        assert!(doc.header.is_none());
+        assert!(doc.blocks.is_empty());
+        // Attribute was set then deleted, so no attributes remain.
+        assert!(doc.attributes.is_none());
     }
 
     #[test]
