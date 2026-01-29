@@ -693,6 +693,14 @@ pub(super) fn build_blocks<'src>(
             continue;
         }
 
+        // Try fenced code block (``` delimiters).
+        if let Some((block, next)) = try_fenced_code(tokens, i, source, idx) {
+            blocks.push(block);
+            pending_title = None;
+            i = next;
+            continue;
+        }
+
         // Try delimited example block.
         if let Some((block, next, diags)) = try_example(tokens, i, source, idx, pending_title.take())
         {
@@ -774,6 +782,7 @@ fn find_paragraph_end(tokens: &[Spanned<'_>], start: usize) -> usize {
             }
             // After a single newline, check if the next line starts a new block.
             if is_listing_delimiter(tokens, i).is_some()
+                || is_fenced_code_delimiter(tokens, i).is_some()
                 || is_sidebar_delimiter(tokens, i).is_some()
                 || is_example_delimiter(tokens, i).is_some()
                 || is_open_delimiter(tokens, i).is_some()
@@ -820,6 +829,132 @@ fn is_open_delimiter(tokens: &[Spanned<'_>], i: usize) -> Option<usize> {
         Some(j + 1)
     } else {
         Some(j)
+    }
+}
+
+/// Check whether position `i` starts a fenced code delimiter line.
+///
+/// A fenced code delimiter is 3 or more consecutive `Backtick` tokens with nothing
+/// else on the line (followed by `Newline` or end-of-tokens). Returns the
+/// index past the delimiter (past the `Newline` if present).
+fn is_fenced_code_delimiter(tokens: &[Spanned<'_>], i: usize) -> Option<usize> {
+    if i + 2 >= tokens.len() {
+        return None;
+    }
+    let mut j = i;
+    while j < tokens.len() && matches!(tokens[j].0, Token::Backtick) {
+        j += 1;
+    }
+    if j - i < 3 {
+        return None;
+    }
+    // Must be followed by Newline or be at end-of-tokens.
+    if j < tokens.len() && !matches!(tokens[j].0, Token::Newline) {
+        return None;
+    }
+    if j < tokens.len() {
+        j += 1;
+    }
+    Some(j)
+}
+
+/// Try to parse a fenced code block starting at position `i`.
+///
+/// A fenced code block uses backtick delimiters and produces a `listing` block.
+/// Returns `Some((block, next_index))` if a complete block is found.
+fn try_fenced_code<'src>(
+    tokens: &[Spanned<'src>],
+    i: usize,
+    source: &'src str,
+    idx: &SourceIndex,
+) -> Option<(Block<'src>, usize)> {
+    let content_start = is_fenced_code_delimiter(tokens, i)?;
+
+    // Count opening backticks to match against the closing delimiter.
+    let mut delim_end_tok = i;
+    while delim_end_tok < tokens.len() && matches!(tokens[delim_end_tok].0, Token::Backtick) {
+        delim_end_tok += 1;
+    }
+    let open_backtick_count = delim_end_tok - i;
+    let delimiter = &source[tokens[i].1.start..tokens[delim_end_tok - 1].1.end];
+
+    // Scan line-by-line for a matching closing delimiter.
+    let mut j = content_start;
+    loop {
+        if j >= tokens.len() {
+            // No closing delimiter found.
+            return None;
+        }
+        // Check for closing delimiter at start of this line.
+        if let Some(after_close) = is_fenced_code_delimiter(tokens, j) {
+            let mut k = j;
+            while k < tokens.len() && matches!(tokens[k].0, Token::Backtick) {
+                k += 1;
+            }
+            if k - j == open_backtick_count {
+                // Matching closing delimiter found.
+
+                // Content tokens are content_start..before the Newline preceding
+                // the closing delimiter.
+                let content_end = if j > content_start && matches!(tokens[j - 1].0, Token::Newline)
+                {
+                    j - 1
+                } else {
+                    j
+                };
+
+                let (value, content_location) = if content_start < content_end {
+                    let start_byte = tokens[content_start].1.start;
+                    let end_byte = tokens[content_end - 1].1.end;
+                    let span = SourceSpan {
+                        start: start_byte,
+                        end: end_byte,
+                    };
+                    (&source[start_byte..end_byte], Some(idx.location(&span)))
+                } else {
+                    ("", None)
+                };
+
+                // Block location: opening delimiter through closing delimiter.
+                let block_span = SourceSpan {
+                    start: tokens[i].1.start,
+                    end: tokens[k - 1].1.end,
+                };
+
+                let text_node = InlineNode::Text(TextNode {
+                    value,
+                    location: content_location,
+                });
+
+                let block = Block {
+                    name: "listing",
+                    form: Some("delimited"),
+                    delimiter: Some(delimiter),
+                    id: None,
+                    style: None,
+                    reftext: None,
+                    metadata: None,
+                    title: None,
+                    level: None,
+                    variant: None,
+                    marker: None,
+                    inlines: Some(vec![text_node]),
+                    blocks: None,
+                    items: None,
+                    principal: None,
+                    location: Some(idx.location(&block_span)),
+                };
+
+                return Some((block, after_close));
+            }
+        }
+        // Advance to the next line.
+        while j < tokens.len() && !matches!(tokens[j].0, Token::Newline) {
+            j += 1;
+        }
+        if j < tokens.len() {
+            j += 1;
+        }
     }
 }
 
@@ -1802,5 +1937,25 @@ mod tests {
             InlineNode::Text(t) => assert_eq!(t.value, "My Example"),
             _ => panic!("expected Text"),
         }
+    }
+
+    #[test]
+    fn doc_fenced_code_block() {
+        let (doc, diags) = parse_doc("```\nputs 'hello'\n```");
+        assert!(diags.is_empty());
+        assert_eq!(doc.blocks.len(), 1);
+        let listing = &doc.blocks[0];
+        assert_eq!(listing.name, "listing");
+        assert_eq!(listing.form, Some("delimited"));
+        assert_eq!(listing.delimiter, Some("```"));
+        let inlines = listing.inlines.as_ref().unwrap();
+        assert_eq!(inlines.len(), 1);
+        match &inlines[0] {
+            InlineNode::Text(t) => assert_eq!(t.value, "puts 'hello'"),
+            _ => panic!("expected Text node"),
+        }
+        let loc = listing.location.as_ref().unwrap();
+        assert_eq!(loc[0], Position { line: 1, col: 1 });
+        assert_eq!(loc[1], Position { line: 3, col: 3 });
     }
 }
