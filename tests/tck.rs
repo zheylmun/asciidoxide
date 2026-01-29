@@ -499,7 +499,6 @@ fn populate_asg_defaults(node: &mut Value) {
 /// Test fixtures that exercise features the parser does not yet support.
 /// Remove entries from this list as the parser gains capabilities.
 const UNSUPPORTED: &[&str] = &[
-    "block/abstract/",
     "block/attributes/",
     "block/break/",
     "block/comment/",
@@ -521,7 +520,6 @@ const UNSUPPORTED: &[&str] = &[
     "block/listing/source-block-promoted",
     "block/literal/",
     "block/metadata/",
-    "block/open/",
     "block/passthrough/",
     "block/quote/",
     "block/section/appendix-section",

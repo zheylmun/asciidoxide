@@ -134,6 +134,38 @@ pub(super) fn extract_header<'src>(
     }
 }
 
+/// Check whether position `i` starts a block attribute line.
+///
+/// A block attribute line is `[` ... `]` on its own line (followed by `Newline`
+/// or end-of-tokens). Returns the index past the attribute line (past the
+/// `Newline` if present).
+fn is_block_attribute_line(tokens: &[Spanned<'_>], i: usize) -> Option<usize> {
+    if i >= tokens.len() || !matches!(tokens[i].0, Token::LBracket) {
+        return None;
+    }
+    let mut j = i + 1;
+    // Scan to the closing bracket.
+    while j < tokens.len()
+        && !matches!(tokens[j].0, Token::RBracket)
+        && !matches!(tokens[j].0, Token::Newline)
+    {
+        j += 1;
+    }
+    // Must have found a closing bracket.
+    if j >= tokens.len() || !matches!(tokens[j].0, Token::RBracket) {
+        return None;
+    }
+    j += 1;
+    // Must be followed by Newline or be at end-of-tokens.
+    if j < tokens.len() && !matches!(tokens[j].0, Token::Newline) {
+        return None;
+    }
+    if j < tokens.len() {
+        j += 1;
+    }
+    Some(j)
+}
+
 /// Build block-level ASG nodes from a body token stream.
 ///
 /// Scans tokens linearly, detecting delimited blocks (e.g., listing) before
@@ -157,6 +189,14 @@ pub(super) fn build_blocks<'src>(
             break;
         }
 
+        // Skip block attribute lines (e.g., [abstract], [source,ruby]).
+        // For now, we consume and discard them; a future enhancement could
+        // attach attributes to the following block.
+        if let Some(next) = is_block_attribute_line(tokens, i) {
+            i = next;
+            continue;
+        }
+
         // Try delimited listing block.
         if let Some((block, next)) = try_listing(tokens, i, source, idx) {
             blocks.push(block);
@@ -166,6 +206,14 @@ pub(super) fn build_blocks<'src>(
 
         // Try delimited sidebar block.
         if let Some((block, next, diags)) = try_sidebar(tokens, i, source, idx) {
+            blocks.push(block);
+            diagnostics.extend(diags);
+            i = next;
+            continue;
+        }
+
+        // Try delimited open block.
+        if let Some((block, next, diags)) = try_open(tokens, i, source, idx) {
             blocks.push(block);
             diagnostics.extend(diags);
             i = next;
@@ -224,6 +272,7 @@ fn find_paragraph_end(tokens: &[Spanned<'_>], start: usize) -> usize {
             // After a single newline, check if the next line starts a new block.
             if is_listing_delimiter(tokens, i).is_some()
                 || is_sidebar_delimiter(tokens, i).is_some()
+                || is_open_delimiter(tokens, i).is_some()
                 || is_list_item(tokens, i)
                 || is_section_heading(tokens, i).is_some()
             {
@@ -235,6 +284,35 @@ fn find_paragraph_end(tokens: &[Spanned<'_>], start: usize) -> usize {
     }
     // Reached end of tokens — strip trailing newlines.
     strip_trailing_newline_index(tokens, start)
+}
+
+/// Check whether position `i` starts an open block delimiter line.
+///
+/// An open block delimiter is exactly 2 consecutive `Hyphen` tokens with nothing
+/// else on the line (followed by `Newline` or end-of-tokens). Returns the
+/// index past the delimiter (past the `Newline` if present).
+fn is_open_delimiter(tokens: &[Spanned<'_>], i: usize) -> Option<usize> {
+    if i + 1 >= tokens.len() {
+        return None;
+    }
+    // Must be exactly 2 hyphens.
+    if !matches!(tokens[i].0, Token::Hyphen) || !matches!(tokens[i + 1].0, Token::Hyphen) {
+        return None;
+    }
+    let j = i + 2;
+    // Third token must NOT be a Hyphen (otherwise it's a listing delimiter).
+    if j < tokens.len() && matches!(tokens[j].0, Token::Hyphen) {
+        return None;
+    }
+    // Must be followed by Newline or be at end-of-tokens.
+    if j < tokens.len() && !matches!(tokens[j].0, Token::Newline) {
+        return None;
+    }
+    if j < tokens.len() {
+        Some(j + 1)
+    } else {
+        Some(j)
+    }
 }
 
 /// Check whether position `i` starts a listing delimiter line.
@@ -465,6 +543,81 @@ fn try_sidebar<'src>(
                     body_diags,
                 ));
             }
+        }
+        // Advance to the next line.
+        while j < tokens.len() && !matches!(tokens[j].0, Token::Newline) {
+            j += 1;
+        }
+        if j < tokens.len() {
+            j += 1;
+        }
+    }
+}
+
+/// Try to parse a delimited open block starting at position `i`.
+///
+/// An open block uses `--` delimiters and has a compound content model — its
+/// content is recursively parsed through [`build_blocks`]. Returns `None` if
+/// no complete open block (opening **and** matching closing delimiter) is found.
+fn try_open<'src>(
+    tokens: &[Spanned<'src>],
+    i: usize,
+    source: &'src str,
+    idx: &SourceIndex,
+) -> Option<(Block<'src>, usize, Vec<ParseDiagnostic>)> {
+    let content_start = is_open_delimiter(tokens, i)?;
+
+    // The delimiter is always exactly "--".
+    let delimiter = &source[tokens[i].1.start..tokens[i + 1].1.end];
+
+    // Scan line-by-line for the closing delimiter.
+    let mut j = content_start;
+    loop {
+        if j >= tokens.len() {
+            return None;
+        }
+        if let Some(after_close) = is_open_delimiter(tokens, j) {
+            // Found closing delimiter.
+
+            // Content tokens: exclude the Newline before the closing delimiter.
+            let content_end = if j > content_start && matches!(tokens[j - 1].0, Token::Newline) {
+                j - 1
+            } else {
+                j
+            };
+
+            // Recursively parse content as blocks.
+            let content_tokens = &tokens[content_start..content_end];
+            let (body_blocks, body_diags) = build_blocks(content_tokens, source, idx);
+
+            // Block location: opening delimiter through closing delimiter.
+            let block_span = SourceSpan {
+                start: tokens[i].1.start,
+                end: tokens[j + 1].1.end,
+            };
+
+            return Some((
+                Block {
+                    name: "open",
+                    form: Some("delimited"),
+                    delimiter: Some(delimiter),
+                    id: None,
+                    style: None,
+                    reftext: None,
+                    metadata: None,
+                    title: None,
+                    level: None,
+                    variant: None,
+                    marker: None,
+                    inlines: None,
+                    blocks: Some(body_blocks),
+                    items: None,
+                    principal: None,
+                    location: Some(idx.location(&block_span)),
+                },
+                after_close,
+                body_diags,
+            ));
         }
         // Advance to the next line.
         while j < tokens.len() && !matches!(tokens[j].0, Token::Newline) {
@@ -888,5 +1041,19 @@ mod tests {
         let loc = sidebar.location.as_ref().unwrap();
         assert_eq!(loc[0], Position { line: 1, col: 1 });
         assert_eq!(loc[1], Position { line: 5, col: 4 });
+    }
+
+    #[test]
+    fn doc_open_block() {
+        let (doc, diags) = parse_doc("--\nhello\n--");
+        assert!(diags.is_empty());
+        assert_eq!(doc.blocks.len(), 1);
+        let open = &doc.blocks[0];
+        assert_eq!(open.name, "open");
+        assert_eq!(open.form, Some("delimited"));
+        assert_eq!(open.delimiter, Some("--"));
+        let blocks = open.blocks.as_ref().unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].name, "paragraph");
     }
 }
