@@ -20,17 +20,103 @@ pub(super) struct HeaderResult<'src> {
     pub(super) attributes: Option<HashMap<&'src str, &'src str>>,
 }
 
+/// Check if an attribute name is valid per the `AsciiDoc` spec.
+///
+/// Valid names match: `^[a-zA-Z0-9_][-a-zA-Z0-9_]*$`
+fn is_valid_attribute_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphanumeric() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// Try to parse a single attribute entry at position `i`.
+///
+/// Pattern: `Colon Text Colon [Whitespace value...] Newline`
+/// Returns `Some((key, value, next_index))` on success.
+fn try_parse_attribute_entry<'src>(
+    tokens: &[Spanned<'src>],
+    i: usize,
+    source: &'src str,
+) -> Option<(&'src str, &'src str, usize)> {
+    if i + 2 >= tokens.len() {
+        return None;
+    }
+    if !matches!(tokens[i].0, Token::Colon) {
+        return None;
+    }
+
+    let key = match &tokens[i + 1].0 {
+        Token::Text(s) => *s,
+        _ => return None,
+    };
+
+    if !is_valid_attribute_name(key) {
+        return None;
+    }
+
+    if !matches!(tokens[i + 2].0, Token::Colon) {
+        return None;
+    }
+
+    // After the second colon, must have:
+    // - Newline or end-of-tokens (empty value)
+    // - Whitespace followed by value
+    let after_colon = i + 3;
+    if after_colon < tokens.len()
+        && !matches!(tokens[after_colon].0, Token::Newline)
+        && !matches!(tokens[after_colon].0, Token::Whitespace)
+    {
+        // Something other than whitespace/newline immediately after colon - not valid.
+        return None;
+    }
+
+    // Skip optional whitespace after second colon.
+    let mut val_start = after_colon;
+    if val_start < tokens.len() && matches!(tokens[val_start].0, Token::Whitespace) {
+        val_start += 1;
+    }
+
+    // Scan to Newline or end-of-tokens.
+    let mut line_end = val_start;
+    while line_end < tokens.len() && !matches!(tokens[line_end].0, Token::Newline) {
+        line_end += 1;
+    }
+
+    // Extract value via source slicing (zero-copy).
+    let value = if val_start < line_end {
+        let start = tokens[val_start].1.start;
+        let end = tokens[line_end - 1].1.end;
+        &source[start..end]
+    } else {
+        ""
+    };
+
+    // Advance past Newline (if present).
+    let next = if line_end < tokens.len() {
+        line_end + 1
+    } else {
+        line_end
+    };
+
+    Some((key, value, next))
+}
+
 /// Detect a document header (`= Title`) at the start of the token stream.
 ///
 /// When a header is found, `attributes` is `Some(map)` (possibly empty).
 /// Attribute entry lines (`:key: value`) immediately following the title are
 /// parsed into the map.
+///
+/// Also handles body-only attribute documents (no title, just `:key: value` lines).
 pub(super) fn extract_header<'src>(
     tokens: &[Spanned<'src>],
     source: &'src str,
     idx: &SourceIndex,
 ) -> HeaderResult<'src> {
-    // Header requires at least: Eq Whitespace <content>
+    // First, check for titled document: Eq Whitespace <content>
     if tokens.len() >= 3
         && matches!(tokens[0].0, Token::Eq)
         && matches!(tokens[1].0, Token::Whitespace)
@@ -124,6 +210,25 @@ pub(super) fn extract_header<'src>(
                 attributes: Some(attributes),
             };
         }
+    }
+
+    // Second, check for body-only attribute entries (no title).
+    if let Some((key, value, mut next)) = try_parse_attribute_entry(tokens, 0, source) {
+        let mut attributes = HashMap::new();
+        attributes.insert(key, value);
+
+        // Continue parsing additional attribute entries.
+        while let Some((k, v, n)) = try_parse_attribute_entry(tokens, next, source) {
+            attributes.insert(k, v);
+            next = n;
+        }
+
+        return HeaderResult {
+            header: None,
+            body_start: next,
+            diagnostics: Vec::new(),
+            attributes: Some(attributes),
+        };
     }
 
     HeaderResult {
@@ -1055,5 +1160,28 @@ mod tests {
         let blocks = open.blocks.as_ref().unwrap();
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].name, "paragraph");
+    }
+
+    #[test]
+    fn doc_body_only_attributes() {
+        let (doc, diags) = parse_doc(":frog: Tanglefoot");
+        assert!(diags.is_empty());
+        assert!(doc.header.is_none());
+        assert!(doc.blocks.is_empty());
+        let attrs = doc.attributes.as_ref().expect("should have attributes");
+        assert_eq!(attrs.get("frog"), Some(&"Tanglefoot"));
+        let loc = doc.location.as_ref().unwrap();
+        assert_eq!(loc[0], Position { line: 1, col: 1 });
+        assert_eq!(loc[1], Position { line: 1, col: 17 });
+    }
+
+    #[test]
+    fn doc_invalid_attr_name_becomes_paragraph() {
+        // `:foo:bar: baz` has a colon in the name position - should be a paragraph
+        let (doc, diags) = parse_doc(":foo:bar: baz");
+        assert!(diags.is_empty());
+        assert!(doc.attributes.is_none());
+        assert_eq!(doc.blocks.len(), 1);
+        assert_eq!(doc.blocks[0].name, "paragraph");
     }
 }
