@@ -1,4 +1,4 @@
-//! Delimited block parsing (listing, literal, example, sidebar, open, fenced code).
+//! Delimited block parsing (listing, literal, example, quote, sidebar, open, fenced code).
 
 use super::{Spanned, build_blocks};
 use crate::asg::{Block, InlineNode, TextNode};
@@ -595,6 +595,123 @@ pub(super) fn try_example<'src>(
                         reftext: None,
                         metadata: None,
                         title,
+                        level: None,
+                        variant: None,
+                        marker: None,
+                        inlines: None,
+                        blocks: Some(body_blocks),
+                        items: None,
+                        principal: None,
+                        location: Some(idx.location(&block_span)),
+                    },
+                    after_close,
+                    body_diags,
+                ));
+            }
+        }
+        // Advance to the next line.
+        while j < tokens.len() && !matches!(tokens[j].0, Token::Newline) {
+            j += 1;
+        }
+        if j < tokens.len() {
+            j += 1;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Quote blocks
+// ---------------------------------------------------------------------------
+
+/// Check whether position `i` starts a quote delimiter line.
+///
+/// A quote delimiter is 4 or more consecutive `Underscore` tokens with nothing
+/// else on the line (followed by `Newline` or end-of-tokens). Returns the
+/// index past the delimiter (past the `Newline` if present).
+pub(super) fn is_quote_delimiter(tokens: &[Spanned<'_>], i: usize) -> Option<usize> {
+    if i + 3 >= tokens.len() {
+        return None;
+    }
+    let mut j = i;
+    while j < tokens.len() && matches!(tokens[j].0, Token::Underscore) {
+        j += 1;
+    }
+    if j - i < 4 {
+        return None;
+    }
+    // Must be followed by Newline or be at end-of-tokens.
+    if j < tokens.len() && !matches!(tokens[j].0, Token::Newline) {
+        return None;
+    }
+    if j < tokens.len() {
+        j += 1;
+    }
+    Some(j)
+}
+
+/// Try to parse a delimited quote block starting at position `i`.
+///
+/// A quote uses `____` delimiters and has a compound content model — its
+/// content is recursively parsed through [`build_blocks`]. Returns `None` if
+/// no complete quote (opening **and** matching closing delimiter) is found.
+pub(super) fn try_quote<'src>(
+    tokens: &[Spanned<'src>],
+    i: usize,
+    source: &'src str,
+    idx: &SourceIndex,
+) -> Option<(Block<'src>, usize, Vec<ParseDiagnostic>)> {
+    let content_start = is_quote_delimiter(tokens, i)?;
+
+    // Count opening underscores to match against the closing delimiter.
+    let mut delim_end_tok = i;
+    while delim_end_tok < tokens.len() && matches!(tokens[delim_end_tok].0, Token::Underscore) {
+        delim_end_tok += 1;
+    }
+    let open_underscore_count = delim_end_tok - i;
+    let delimiter = &source[tokens[i].1.start..tokens[delim_end_tok - 1].1.end];
+
+    // Scan line-by-line for a matching closing delimiter.
+    let mut j = content_start;
+    loop {
+        if j >= tokens.len() {
+            return None;
+        }
+        if let Some(after_close) = is_quote_delimiter(tokens, j) {
+            let mut k = j;
+            while k < tokens.len() && matches!(tokens[k].0, Token::Underscore) {
+                k += 1;
+            }
+            if k - j == open_underscore_count {
+                // Matching closing delimiter found.
+
+                // Content tokens: exclude the Newline before the closing delimiter.
+                let content_end = if j > content_start && matches!(tokens[j - 1].0, Token::Newline)
+                {
+                    j - 1
+                } else {
+                    j
+                };
+
+                // Recursively parse content as blocks.
+                let content_tokens = &tokens[content_start..content_end];
+                let (body_blocks, body_diags) = build_blocks(content_tokens, source, idx);
+
+                // Block location: opening delimiter through closing delimiter.
+                let block_span = SourceSpan {
+                    start: tokens[i].1.start,
+                    end: tokens[k - 1].1.end,
+                };
+
+                return Some((
+                    Block {
+                        name: "quote",
+                        form: Some("delimited"),
+                        delimiter: Some(delimiter),
+                        id: None,
+                        style: None,
+                        reftext: None,
+                        metadata: None,
+                        title: None,
                         level: None,
                         variant: None,
                         marker: None,

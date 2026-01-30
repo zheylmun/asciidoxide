@@ -20,7 +20,8 @@ pub(super) use attributes::{HeaderResult, extract_header};
 use breaks::try_break;
 use comments::{is_line_comment, try_skip_block_comment};
 use delimited::{
-    try_example, try_fenced_code, try_listing, try_literal, try_open, try_passthrough, try_sidebar,
+    try_example, try_fenced_code, try_listing, try_literal, try_open, try_passthrough, try_quote,
+    try_sidebar,
 };
 use lists::try_list;
 use metadata::{is_block_attribute_line, skip_comment_block, try_block_title};
@@ -121,6 +122,15 @@ pub(super) fn build_blocks<'src>(
         {
             blocks.push(block);
             diagnostics.extend(diags);
+            i = next;
+            continue;
+        }
+
+        // Try delimited quote block.
+        if let Some((block, next, diags)) = try_quote(tokens, i, source, idx) {
+            blocks.push(block);
+            diagnostics.extend(diags);
+            pending_title = None;
             i = next;
             continue;
         }
@@ -543,5 +553,33 @@ mod tests {
         let loc = literal.location.as_ref().unwrap();
         assert_eq!(loc[0], Position { line: 1, col: 1 });
         assert_eq!(loc[1], Position { line: 5, col: 4 });
+    }
+
+    #[test]
+    fn doc_quote_block() {
+        let (doc, diags) = parse_doc("____\nA famous quote.\n____");
+        assert!(diags.is_empty());
+        assert_eq!(doc.blocks.len(), 1);
+        let quote = &doc.blocks[0];
+        assert_eq!(quote.name, "quote");
+        assert_eq!(quote.form, Some("delimited"));
+        assert_eq!(quote.delimiter, Some("____"));
+        let blocks = quote.blocks.as_ref().unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].name, "paragraph");
+        let inlines = blocks[0].inlines.as_ref().unwrap();
+        assert_eq!(inlines.len(), 1);
+        match &inlines[0] {
+            InlineNode::Text(t) => {
+                assert_eq!(t.value, "A famous quote.");
+                let loc = t.location.as_ref().unwrap();
+                assert_eq!(loc[0], Position { line: 2, col: 1 });
+                assert_eq!(loc[1], Position { line: 2, col: 15 });
+            }
+            _ => panic!("expected Text node"),
+        }
+        let loc = quote.location.as_ref().unwrap();
+        assert_eq!(loc[0], Position { line: 1, col: 1 });
+        assert_eq!(loc[1], Position { line: 3, col: 4 });
     }
 }
