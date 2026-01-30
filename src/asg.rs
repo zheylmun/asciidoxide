@@ -11,23 +11,30 @@ use std::collections::HashMap;
 pub enum AttributeValue<'a> {
     /// A single-line value (zero-copy slice from source).
     Single(&'a str),
-    /// A multiline value with continuation lines.
+    /// A multiline value with backslash continuation lines.
     ///
     /// Each element is a line segment; when resolved, segments are joined
     /// with a single space (backslash and leading whitespace removed).
     Multiline(Vec<&'a str>),
+    /// A multiline value with legacy `+` continuation lines.
+    ///
+    /// Each element is a line segment; when resolved, segments are directly
+    /// concatenated (trailing whitespace preserved, no separator added).
+    MultilineLegacy(Vec<&'a str>),
 }
 
 impl<'a> AttributeValue<'a> {
     /// Resolve the attribute value to a string.
     ///
     /// For single-line values, returns a borrowed reference (no allocation).
-    /// For multiline values, joins segments with spaces and returns an owned string.
+    /// For backslash multiline values, joins segments with spaces and returns an owned string.
+    /// For legacy `+` multiline values, concatenates segments directly (no separator).
     #[must_use]
     pub fn resolve(&self) -> Cow<'a, str> {
         match self {
             Self::Single(s) => Cow::Borrowed(s),
             Self::Multiline(segments) => Cow::Owned(segments.join(" ")),
+            Self::MultilineLegacy(segments) => Cow::Owned(segments.concat()),
         }
     }
 
@@ -38,14 +45,14 @@ impl<'a> AttributeValue<'a> {
     pub fn as_str(&self) -> Option<&'a str> {
         match self {
             Self::Single(s) => Some(s),
-            Self::Multiline(_) => None,
+            Self::Multiline(_) | Self::MultilineLegacy(_) => None,
         }
     }
 
     /// Returns `true` if this is a multiline value.
     #[must_use]
     pub fn is_multiline(&self) -> bool {
-        matches!(self, Self::Multiline(_))
+        matches!(self, Self::Multiline(_) | Self::MultilineLegacy(_))
     }
 }
 

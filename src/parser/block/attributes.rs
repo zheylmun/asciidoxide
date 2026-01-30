@@ -48,7 +48,9 @@ enum AttributeEntry<'src> {
 /// `val_start` is the index of the first value token.
 /// `line_end` is the index of the Newline token (or end of tokens).
 /// Returns the parsed segments and the token index to continue from.
-fn parse_multiline_attribute_value<'src>(
+///
+/// Backslash continuation trims trailing whitespace and joins with spaces.
+fn parse_backslash_multiline<'src>(
     tokens: &[Spanned<'src>],
     val_start: usize,
     line_end: usize,
@@ -98,6 +100,83 @@ fn parse_multiline_attribute_value<'src>(
                 let end = tokens[seg_end - 1].1.end;
                 let segment = &source[start..end];
                 segments.push(segment.trim_end());
+            }
+            // Advance past newline.
+            if pos < tokens.len() {
+                pos += 1;
+            }
+        } else {
+            // Final line (no continuation).
+            if cont_start < pos {
+                let start = tokens[cont_start].1.start;
+                let end = tokens[pos - 1].1.end;
+                segments.push(&source[start..end]);
+            }
+            // Advance past newline if present.
+            if pos < tokens.len() {
+                pos += 1;
+            }
+            break;
+        }
+    }
+
+    (segments, pos)
+}
+
+/// Parse a multiline attribute value with legacy `+` continuation.
+///
+/// `val_start` is the index of the first value token.
+/// `line_end` is the index of the Newline token (or end of tokens).
+/// Returns the parsed segments and the token index to continue from.
+///
+/// Legacy `+` continuation preserves trailing whitespace and concatenates directly.
+fn parse_legacy_plus_multiline<'src>(
+    tokens: &[Spanned<'src>],
+    val_start: usize,
+    line_end: usize,
+    source: &'src str,
+) -> (Vec<&'src str>, usize) {
+    let mut segments: Vec<&'src str> = Vec::new();
+
+    // Extract first segment (before the +).
+    // Preserve trailing whitespace before the `+`.
+    let seg_end = line_end - 1; // Exclude the `+`
+    if val_start < seg_end {
+        let start = tokens[val_start].1.start;
+        let end = tokens[seg_end - 1].1.end;
+        segments.push(&source[start..end]);
+    }
+
+    // Advance past newline to continuation line.
+    let mut pos = if line_end < tokens.len() {
+        line_end + 1
+    } else {
+        line_end
+    };
+
+    // Read continuation lines.
+    while pos < tokens.len() {
+        // Skip leading whitespace on continuation line.
+        if matches!(tokens[pos].0, Token::Whitespace) {
+            pos += 1;
+        }
+
+        // Find end of this line.
+        let cont_start = pos;
+        while pos < tokens.len() && !matches!(tokens[pos].0, Token::Newline) {
+            pos += 1;
+        }
+
+        // Check if this line also has `+` continuation.
+        let line_has_continuation = pos > cont_start && matches!(tokens[pos - 1].0, Token::Plus);
+
+        if line_has_continuation {
+            // Extract segment before `+`, preserving trailing whitespace.
+            let seg_end = pos - 1;
+            if cont_start < seg_end {
+                let start = tokens[cont_start].1.start;
+                let end = tokens[seg_end - 1].1.end;
+                segments.push(&source[start..end]);
             }
             // Advance past newline.
             if pos < tokens.len() {
@@ -220,13 +299,19 @@ fn try_parse_attribute_entry<'src>(
         line_end += 1;
     }
 
-    // Check if line ends with backslash (continuation).
-    let has_continuation =
-        line_end > val_start && line_end >= 2 && matches!(tokens[line_end - 1].0, Token::Backslash);
+    // Check if line ends with backslash (continuation) or `+` (legacy continuation).
+    let has_backslash_continuation =
+        line_end > val_start && matches!(tokens[line_end - 1].0, Token::Backslash);
+    let has_plus_continuation =
+        line_end > val_start && matches!(tokens[line_end - 1].0, Token::Plus);
 
-    if has_continuation {
-        let (segments, pos) = parse_multiline_attribute_value(tokens, val_start, line_end, source);
+    if has_backslash_continuation {
+        let (segments, pos) = parse_backslash_multiline(tokens, val_start, line_end, source);
         let value = AttributeValue::Multiline(segments);
+        Some((AttributeEntry::Set { key, value }, pos))
+    } else if has_plus_continuation {
+        let (segments, pos) = parse_legacy_plus_multiline(tokens, val_start, line_end, source);
+        let value = AttributeValue::MultilineLegacy(segments);
         Some((AttributeEntry::Set { key, value }, pos))
     } else {
         // Single-line attribute value.
