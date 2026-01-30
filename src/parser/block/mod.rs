@@ -1,7 +1,8 @@
-//! Block/document parser: procedural, line-oriented block structure detection.
+//! Block/document parser: chumsky-based block structure detection.
 
 mod attributes;
 mod breaks;
+mod combinators;
 mod comments;
 mod delimited;
 mod lists;
