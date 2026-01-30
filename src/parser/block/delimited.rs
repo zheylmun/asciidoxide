@@ -1,6 +1,6 @@
 //! Delimited block parsing (listing, example, sidebar, open, fenced code).
 
-use super::{build_blocks, Spanned};
+use super::{Spanned, build_blocks};
 use crate::asg::{Block, InlineNode, TextNode};
 use crate::diagnostic::ParseDiagnostic;
 use crate::span::{SourceIndex, SourceSpan};
@@ -189,16 +189,20 @@ pub(super) fn try_fenced_code<'src>(
                     j
                 };
 
-                let (value, content_location) = if content_start < content_end {
+                // Build inlines: only create a text node if there's actual content.
+                let inlines = if content_start < content_end {
                     let start_byte = tokens[content_start].1.start;
                     let end_byte = tokens[content_end - 1].1.end;
                     let span = SourceSpan {
                         start: start_byte,
                         end: end_byte,
                     };
-                    (&source[start_byte..end_byte], Some(idx.location(&span)))
+                    vec![InlineNode::Text(TextNode {
+                        value: &source[start_byte..end_byte],
+                        location: Some(idx.location(&span)),
+                    })]
                 } else {
-                    ("", None)
+                    vec![]
                 };
 
                 // Block location: opening delimiter through closing delimiter.
@@ -206,11 +210,6 @@ pub(super) fn try_fenced_code<'src>(
                     start: tokens[i].1.start,
                     end: tokens[k - 1].1.end,
                 };
-
-                let text_node = InlineNode::Text(TextNode {
-                    value,
-                    location: content_location,
-                });
 
                 let block = Block {
                     name: "listing",
@@ -224,7 +223,7 @@ pub(super) fn try_fenced_code<'src>(
                     level: None,
                     variant: None,
                     marker: None,
-                    inlines: Some(vec![text_node]),
+                    inlines: Some(inlines),
                     blocks: None,
                     items: None,
                     principal: None,
@@ -319,16 +318,20 @@ pub(super) fn try_listing<'src>(
                     j
                 };
 
-                let (value, content_location) = if content_start < content_end {
+                // Build inlines: only create a text node if there's actual content.
+                let inlines = if content_start < content_end {
                     let start_byte = tokens[content_start].1.start;
                     let end_byte = tokens[content_end - 1].1.end;
                     let span = SourceSpan {
                         start: start_byte,
                         end: end_byte,
                     };
-                    (&source[start_byte..end_byte], Some(idx.location(&span)))
+                    vec![InlineNode::Text(TextNode {
+                        value: &source[start_byte..end_byte],
+                        location: Some(idx.location(&span)),
+                    })]
                 } else {
-                    ("", None)
+                    vec![]
                 };
 
                 // Block location: opening delimiter through closing delimiter.
@@ -336,11 +339,6 @@ pub(super) fn try_listing<'src>(
                     start: tokens[i].1.start,
                     end: tokens[k - 1].1.end,
                 };
-
-                let text_node = InlineNode::Text(TextNode {
-                    value,
-                    location: content_location,
-                });
 
                 let block = Block {
                     name: "listing",
@@ -354,7 +352,7 @@ pub(super) fn try_listing<'src>(
                     level: None,
                     variant: None,
                     marker: None,
-                    inlines: Some(vec![text_node]),
+                    inlines: Some(inlines),
                     blocks: None,
                     items: None,
                     principal: None,
