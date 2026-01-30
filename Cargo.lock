@@ -27,7 +27,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "asciidoc"
+name = "asciidoxide"
 version = "0.1.0"
 dependencies = [
  "chumsky",

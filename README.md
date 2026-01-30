@@ -1,4 +1,4 @@
-# asciidoc
+# asciidoxide
 
 High performance [AsciiDoc](https://asciidoc.org) lexer and parser library written in safe Rust.
 The project aims to provide a zero-copy, spec-compliant `AsciiDoc` parser.

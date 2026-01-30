@@ -8,8 +8,8 @@
 //! types via `From` impls, injecting the constant `name`/`type` fields that the
 //! TCK JSON format requires.
 
-use asciidoc::asg;
-use asciidoc::{parse_document, parse_inline};
+use asciidoxide::asg;
+use asciidoxide::{parse_document, parse_inline};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;

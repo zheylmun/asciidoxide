@@ -6,8 +6,8 @@
 //!
 //! The harness invokes this same binary with the env var set to get parser output.
 
-use asciidoc::asg;
-use asciidoc::{parse_document, parse_inline};
+use asciidoxide::asg;
+use asciidoxide::{parse_document, parse_inline};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
