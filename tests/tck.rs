@@ -171,6 +171,7 @@ enum JsonInlineNode<'a> {
     Text(JsonTextNode<'a>),
     Span(JsonSpanNode<'a>),
     Ref(JsonRefNode<'a>),
+    Raw(JsonRawNode<'a>),
 }
 
 impl<'a> From<&asg::InlineNode<'a>> for JsonInlineNode<'a> {
@@ -179,6 +180,7 @@ impl<'a> From<&asg::InlineNode<'a>> for JsonInlineNode<'a> {
             asg::InlineNode::Text(t) => Self::Text(JsonTextNode::from(t)),
             asg::InlineNode::Span(s) => Self::Span(JsonSpanNode::from(s)),
             asg::InlineNode::Ref(r) => Self::Ref(JsonRefNode::from(r)),
+            asg::InlineNode::Raw(r) => Self::Raw(JsonRawNode::from(r)),
         }
     }
 }
@@ -249,6 +251,27 @@ impl<'a> From<&asg::RefNode<'a>> for JsonRefNode<'a> {
             variant: r.variant,
             target: r.target,
             inlines: r.inlines.iter().map(JsonInlineNode::from).collect(),
+            location: r.location.as_ref().map(convert_location),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct JsonRawNode<'a> {
+    name: &'static str,
+    #[serde(rename = "type")]
+    node_type: &'static str,
+    value: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    location: Option<JsonLocation>,
+}
+
+impl<'a> From<&asg::RawNode<'a>> for JsonRawNode<'a> {
+    fn from(r: &asg::RawNode<'a>) -> Self {
+        Self {
+            name: "raw",
+            node_type: "string",
+            value: r.value,
             location: r.location.as_ref().map(convert_location),
         }
     }
@@ -542,7 +565,6 @@ const UNSUPPORTED: &[&str] = &[
     "block/section/title-body",
     "block/stem/",
     "block/verse/",
-    "inline/passthrough/",
 ];
 
 fn is_unsupported(path: &str) -> bool {

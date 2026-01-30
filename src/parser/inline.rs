@@ -3,7 +3,7 @@
 use chumsky::{extra, input::ValueInput, prelude::*};
 
 use super::Spanned;
-use crate::asg::{InlineNode, RefNode, SpanNode, TextNode};
+use crate::asg::{InlineNode, RawNode, RefNode, SpanNode, TextNode};
 use crate::diagnostic::{ParseDiagnostic, Severity};
 use crate::span::{SourceIndex, SourceSpan};
 use crate::token::Token;
@@ -277,6 +277,100 @@ where
     (unconstrained, constrained)
 }
 
+/// Parsers for inline literal (plus delimiters): unconstrained (`++..++`)
+/// and constrained (`+..+`).
+///
+/// Unlike code spans, inline literals produce text nodes with the content value
+/// but location spanning the full delimited form.
+///
+/// Returns `(unconstrained, constrained)`.
+fn inline_literal_parsers<'tokens, 'src: 'tokens, I>(
+    source: &'src str,
+    idx: &'tokens SourceIndex,
+) -> (
+    impl Parser<'tokens, I, InlineNode<'src>, ParseExtra<'tokens, 'src>> + Clone + 'tokens,
+    impl Parser<'tokens, I, InlineNode<'src>, ParseExtra<'tokens, 'src>> + Clone + 'tokens,
+)
+where
+    I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
+{
+    // Content: any tokens except Plus
+    let literal_content = any()
+        .filter(|t: &Token| !matches!(t, Token::Plus))
+        .repeated()
+        .at_least(1);
+
+    // Unconstrained: ++content++
+    let unconstrained = just(Token::Plus)
+        .then(just(Token::Plus))
+        .ignore_then(literal_content)
+        .then_ignore(just(Token::Plus).then(just(Token::Plus)))
+        .map_with(move |_toks, e| {
+            let span: SourceSpan = e.span();
+            // Extract content between delimiters (skip first 2 and last 2 bytes)
+            let content_start = span.start + 2;
+            let content_end = span.end - 2;
+            let value = &source[content_start..content_end];
+            InlineNode::Text(TextNode {
+                value,
+                location: Some(idx.location(&span)),
+            })
+        });
+
+    // Constrained: +content+
+    let constrained = just(Token::Plus)
+        .ignore_then(literal_content)
+        .then_ignore(just(Token::Plus))
+        .map_with(move |_toks, e| {
+            let span: SourceSpan = e.span();
+            // Extract content between delimiters (skip first and last byte)
+            let content_start = span.start + 1;
+            let content_end = span.end - 1;
+            let value = &source[content_start..content_end];
+            InlineNode::Text(TextNode {
+                value,
+                location: Some(idx.location(&span)),
+            })
+        });
+
+    (unconstrained, constrained)
+}
+
+/// Parser for triple-plus passthrough (`+++..+++`).
+///
+/// Produces a raw node with the content passed through without processing.
+fn triple_plus_passthrough_parser<'tokens, 'src: 'tokens, I>(
+    source: &'src str,
+    idx: &'tokens SourceIndex,
+) -> impl Parser<'tokens, I, InlineNode<'src>, ParseExtra<'tokens, 'src>> + Clone + 'tokens
+where
+    I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
+{
+    // Content: any tokens except Plus sequences of 3+
+    // We'll be greedy and stop at +++
+    let raw_content = any()
+        .filter(|t: &Token| !matches!(t, Token::Plus))
+        .repeated()
+        .at_least(1);
+
+    just(Token::Plus)
+        .then(just(Token::Plus))
+        .then(just(Token::Plus))
+        .ignore_then(raw_content)
+        .then_ignore(just(Token::Plus).then(just(Token::Plus)).then(just(Token::Plus)))
+        .map_with(move |_toks, e| {
+            let span: SourceSpan = e.span();
+            // Extract content between delimiters (skip first 3 and last 3 bytes)
+            let content_start = span.start + 3;
+            let content_end = span.end - 3;
+            let value = &source[content_start..content_end];
+            InlineNode::Raw(RawNode {
+                value,
+                location: Some(idx.location(&span)),
+            })
+        })
+}
+
 /// Parser that treats a single token as literal text.
 fn token_as_text<'tokens, 'src: 'tokens, I>(
     token: Token<'src>,
@@ -326,6 +420,7 @@ where
                         | Token::UnderscoreEscaped
                         | Token::Hash
                         | Token::HashEscaped
+                        | Token::Plus
                         | Token::Placeholder(_)
                 )
             })
@@ -348,6 +443,10 @@ where
             emphasis_span_parsers(single_inline.clone(), idx);
         let (mark_unconstrained, mark_constrained) = mark_span_parsers(single_inline, idx);
 
+        // Inline literal and passthrough parsers
+        let triple_plus = triple_plus_passthrough_parser(source, idx);
+        let (literal_unconstrained, literal_constrained) = inline_literal_parsers(source, idx);
+
         let backslash_as_text = token_as_text(Token::Backslash, source, idx);
 
         // Match a Placeholder token and return the pre-parsed inline node.
@@ -367,6 +466,10 @@ where
             emphasis_constrained,
             mark_unconstrained,
             mark_constrained,
+            // Triple-plus must be before double-plus which must be before single-plus
+            triple_plus,
+            literal_unconstrained,
+            literal_constrained,
             placeholder,
             escaped,
             text_run,
@@ -400,6 +503,7 @@ where
     let underscore_escaped_as_text = token_as_text(Token::UnderscoreEscaped, source, idx);
     let hash_as_text = token_as_text(Token::Hash, source, idx);
     let hash_escaped_as_text = token_as_text(Token::HashEscaped, source, idx);
+    let plus_as_text = token_as_text(Token::Plus, source, idx);
 
     // Catch-all recovery: if all grammar branches fail on a token, consume
     // it as a text node. This emits the original parse error as a diagnostic
@@ -422,6 +526,7 @@ where
         underscore_escaped_as_text,
         hash_as_text,
         hash_escaped_as_text,
+        plus_as_text,
     ))
     .recover_with(via_parser(catch_all))
     .repeated()
@@ -465,11 +570,19 @@ fn run_chumsky_inline<'tokens, 'src: 'tokens>(
 // Inline macro detection (procedural, runs before chumsky)
 // ---------------------------------------------------------------------------
 
-/// A detected inline macro (link, xref, or bare URL) in the token stream.
+/// The type of inline macro detected.
+enum MacroType {
+    /// A reference macro (`link:` or `xref:`).
+    Ref { variant: &'static str },
+    /// A pass macro (`pass:[]`) producing raw content.
+    Pass,
+}
+
+/// A detected inline macro (link, xref, bare URL, or pass) in the token stream.
 struct MacroMatch<'a> {
-    /// Reference variant (`"link"` or `"xref"`).
-    variant: &'static str,
-    /// Target URL or path (zero-copy slice of source).
+    /// The type of macro.
+    macro_type: MacroType,
+    /// Target URL or path (zero-copy slice of source). Empty for pass macros.
     target: &'a str,
     /// Token index of the first token in the macro.
     tok_start: usize,
@@ -483,13 +596,14 @@ struct MacroMatch<'a> {
     byte_end: usize,
 }
 
-/// Scan the token stream for inline macros (link, xref, bare URL).
+/// Scan the token stream for inline macros (link, xref, bare URL, pass).
 fn find_inline_macros<'src>(tokens: &[Spanned<'src>], source: &'src str) -> Vec<MacroMatch<'src>> {
     let mut matches = Vec::new();
     let mut i = 0;
     while i < tokens.len() {
         if let Some(m) = try_named_macro(tokens, i, source, "link", "link")
             .or_else(|| try_named_macro(tokens, i, source, "xref", "xref"))
+            .or_else(|| try_pass_macro(tokens, i, source))
             .or_else(|| try_bare_url(tokens, i, source))
         {
             let next = m.tok_end;
@@ -566,11 +680,75 @@ fn try_named_macro<'src>(
 
     // k is at the closing RBracket.
     Some(MacroMatch {
-        variant,
+        macro_type: MacroType::Ref { variant },
         target,
         tok_start: i,
         tok_end: k + 1,
         content_tok_range: Some((content_start, k)),
+        byte_start: tokens[i].1.start,
+        byte_end: tokens[k].1.end,
+    })
+}
+
+/// Try to match a pass macro (`pass:[content]`) starting at token position `i`.
+fn try_pass_macro<'src>(
+    tokens: &[Spanned<'src>],
+    i: usize,
+    source: &'src str,
+) -> Option<MacroMatch<'src>> {
+    if i + 2 >= tokens.len() {
+        return None;
+    }
+    let is_match = matches!(&tokens[i].0, Token::Text(s) if *s == "pass");
+    if !is_match
+        || !matches!(tokens[i + 1].0, Token::Colon)
+        || !matches!(tokens[i + 2].0, Token::LBracket)
+    {
+        return None;
+    }
+
+    // Find matching RBracket.
+    let content_start = i + 3;
+    let mut k = content_start;
+    let mut depth: u32 = 1;
+    while k < tokens.len() {
+        match tokens[k].0 {
+            Token::LBracket => depth += 1,
+            Token::RBracket => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            _ => {}
+        }
+        k += 1;
+    }
+    if depth != 0 {
+        return None;
+    }
+
+    // k is at the closing RBracket.
+    // Extract raw content between brackets.
+    let content_byte_start = if content_start < k {
+        tokens[content_start].1.start
+    } else {
+        // Empty content
+        tokens[k].1.start
+    };
+    let content_byte_end = if content_start < k {
+        tokens[k - 1].1.end
+    } else {
+        tokens[k].1.start
+    };
+    let raw_content = &source[content_byte_start..content_byte_end];
+
+    Some(MacroMatch {
+        macro_type: MacroType::Pass,
+        target: raw_content, // Use target field to store raw content
+        tok_start: i,
+        tok_end: k + 1,
+        content_tok_range: None, // Content is not parsed as inlines
         byte_start: tokens[i].1.start,
         byte_end: tokens[k].1.end,
     })
@@ -614,7 +792,7 @@ fn try_bare_url<'src>(
     let url = &source[byte_start..byte_end];
 
     Some(MacroMatch {
-        variant: "link",
+        macro_type: MacroType::Ref { variant: "link" },
         target: url,
         tok_start: i,
         tok_end: j,
@@ -709,33 +887,46 @@ pub(super) fn run_inline_parser<'tokens, 'src: 'tokens>(
 
     let empty: &[InlineNode<'src>] = &[];
     for m in &macros {
-        let ref_inlines = if let Some((cs, ce)) = m.content_tok_range {
-            let content_tokens = &tokens[cs..ce];
-            let (nodes, diags) = run_chumsky_inline(content_tokens, source, idx, empty);
-            diagnostics.extend(diags);
-            nodes
-        } else {
-            // Bare URL: display text is the URL itself.
-            let url_span = SourceSpan {
-                start: m.byte_start,
-                end: m.byte_end,
-            };
-            vec![InlineNode::Text(TextNode {
-                value: m.target,
-                location: Some(idx.location(&url_span)),
-            })]
-        };
-
         let macro_span = SourceSpan {
             start: m.byte_start,
             end: m.byte_end,
         };
-        pre_parsed.push(InlineNode::Ref(RefNode {
-            variant: m.variant,
-            target: m.target,
-            inlines: ref_inlines,
-            location: Some(idx.location(&macro_span)),
-        }));
+
+        let node = match &m.macro_type {
+            MacroType::Pass => {
+                // Pass macro: raw content, no inline parsing
+                InlineNode::Raw(RawNode {
+                    value: m.target, // target field holds raw content for pass macros
+                    location: Some(idx.location(&macro_span)),
+                })
+            }
+            MacroType::Ref { variant } => {
+                let ref_inlines = if let Some((cs, ce)) = m.content_tok_range {
+                    let content_tokens = &tokens[cs..ce];
+                    let (nodes, diags) = run_chumsky_inline(content_tokens, source, idx, empty);
+                    diagnostics.extend(diags);
+                    nodes
+                } else {
+                    // Bare URL: display text is the URL itself.
+                    let url_span = SourceSpan {
+                        start: m.byte_start,
+                        end: m.byte_end,
+                    };
+                    vec![InlineNode::Text(TextNode {
+                        value: m.target,
+                        location: Some(idx.location(&url_span)),
+                    })]
+                };
+
+                InlineNode::Ref(RefNode {
+                    variant,
+                    target: m.target,
+                    inlines: ref_inlines,
+                    location: Some(idx.location(&macro_span)),
+                })
+            }
+        };
+        pre_parsed.push(node);
     }
 
     // Build unified stream: copy non-macro tokens, replace each macro range
@@ -789,6 +980,7 @@ fn merge_text_nodes<'a>(nodes: Vec<InlineNode<'a>>, source: &'a str) -> Vec<Inli
                 InlineNode::Ref(r)
             }
             InlineNode::Text(t) => InlineNode::Text(t),
+            InlineNode::Raw(r) => InlineNode::Raw(r),
         };
 
         // Try to merge with the previous text node if values are contiguous.

@@ -131,7 +131,7 @@ pub struct Block<'a> {
     pub location: Option<Location>,
 }
 
-/// An inline ASG node — text, formatting span, or reference.
+/// An inline ASG node — text, formatting span, reference, or raw passthrough.
 #[derive(Debug, Clone, PartialEq)]
 pub enum InlineNode<'a> {
     /// A text string node.
@@ -140,6 +140,8 @@ pub enum InlineNode<'a> {
     Span(SpanNode<'a>),
     /// An inline reference (link or cross-reference).
     Ref(RefNode<'a>),
+    /// A raw passthrough node (content that bypasses processing).
+    Raw(RawNode<'a>),
 }
 
 /// A leaf text node in the ASG.
@@ -173,6 +175,18 @@ pub struct RefNode<'a> {
     pub target: &'a str,
     /// Child inline nodes (display text).
     pub inlines: Vec<InlineNode<'a>>,
+    /// Source location.
+    pub location: Option<Location>,
+}
+
+/// A raw passthrough node (content that bypasses processing).
+///
+/// Used for triple-plus passthrough (`+++..+++`) and `pass:[]` macros.
+/// The content is passed through without any substitutions.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RawNode<'a> {
+    /// The raw value, borrowed from the input.
+    pub value: &'a str,
     /// Source location.
     pub location: Option<Location>,
 }
