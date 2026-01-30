@@ -3,8 +3,8 @@
 use super::breaks::{is_page_break, is_thematic_break};
 use super::comments::{is_block_comment_delimiter, is_line_comment};
 use super::delimited::{
-    is_example_delimiter, is_fenced_code_delimiter, is_listing_delimiter, is_open_delimiter,
-    is_passthrough_delimiter, is_sidebar_delimiter,
+    is_example_delimiter, is_fenced_code_delimiter, is_listing_delimiter, is_literal_delimiter,
+    is_open_delimiter, is_passthrough_delimiter, is_sidebar_delimiter,
 };
 use super::lists::is_list_item;
 use super::sections::is_section_heading;
@@ -37,6 +37,7 @@ pub(super) fn find_paragraph_end(tokens: &[Spanned<'_>], start: usize) -> usize 
             }
             // After a single newline, check if the next line starts a new block.
             if is_listing_delimiter(tokens, i).is_some()
+                || is_literal_delimiter(tokens, i).is_some()
                 || is_fenced_code_delimiter(tokens, i).is_some()
                 || is_sidebar_delimiter(tokens, i).is_some()
                 || is_example_delimiter(tokens, i).is_some()

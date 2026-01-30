@@ -20,7 +20,7 @@ pub(super) use attributes::{HeaderResult, extract_header};
 use breaks::try_break;
 use comments::{is_line_comment, try_skip_block_comment};
 use delimited::{
-    try_example, try_fenced_code, try_listing, try_open, try_passthrough, try_sidebar,
+    try_example, try_fenced_code, try_listing, try_literal, try_open, try_passthrough, try_sidebar,
 };
 use lists::try_list;
 use metadata::{is_block_attribute_line, skip_comment_block, try_block_title};
@@ -93,6 +93,14 @@ pub(super) fn build_blocks<'src>(
 
         // Try delimited listing block.
         if let Some((block, next)) = try_listing(tokens, i, source, idx) {
+            blocks.push(block);
+            pending_title = None;
+            i = next;
+            continue;
+        }
+
+        // Try delimited literal block.
+        if let Some((block, next)) = try_literal(tokens, i, source, idx) {
             blocks.push(block);
             pending_title = None;
             i = next;
@@ -510,5 +518,30 @@ mod tests {
         let loc = listing.location.as_ref().unwrap();
         assert_eq!(loc[0], Position { line: 1, col: 1 });
         assert_eq!(loc[1], Position { line: 3, col: 3 });
+    }
+
+    #[test]
+    fn doc_literal_block() {
+        let (doc, diags) = parse_doc("....\nline one\n\nline two\n....");
+        assert!(diags.is_empty());
+        assert_eq!(doc.blocks.len(), 1);
+        let literal = &doc.blocks[0];
+        assert_eq!(literal.name, "literal");
+        assert_eq!(literal.form, Some("delimited"));
+        assert_eq!(literal.delimiter, Some("...."));
+        let inlines = literal.inlines.as_ref().unwrap();
+        assert_eq!(inlines.len(), 1);
+        match &inlines[0] {
+            InlineNode::Text(t) => {
+                assert_eq!(t.value, "line one\n\nline two");
+                let loc = t.location.as_ref().unwrap();
+                assert_eq!(loc[0], Position { line: 2, col: 1 });
+                assert_eq!(loc[1], Position { line: 4, col: 8 });
+            }
+            _ => panic!("expected Text node"),
+        }
+        let loc = literal.location.as_ref().unwrap();
+        assert_eq!(loc[0], Position { line: 1, col: 1 });
+        assert_eq!(loc[1], Position { line: 5, col: 4 });
     }
 }

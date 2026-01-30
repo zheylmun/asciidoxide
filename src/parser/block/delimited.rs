@@ -1,4 +1,4 @@
-//! Delimited block parsing (listing, example, sidebar, open, fenced code).
+//! Delimited block parsing (listing, literal, example, sidebar, open, fenced code).
 
 use super::{Spanned, build_blocks};
 use crate::asg::{Block, InlineNode, TextNode};
@@ -342,6 +342,135 @@ pub(super) fn try_listing<'src>(
 
                 let block = Block {
                     name: "listing",
+                    form: Some("delimited"),
+                    delimiter: Some(delimiter),
+                    id: None,
+                    style: None,
+                    reftext: None,
+                    metadata: None,
+                    title: None,
+                    level: None,
+                    variant: None,
+                    marker: None,
+                    inlines: Some(inlines),
+                    blocks: None,
+                    items: None,
+                    principal: None,
+                    location: Some(idx.location(&block_span)),
+                };
+
+                return Some((block, after_close));
+            }
+        }
+        // Advance to the next line.
+        while j < tokens.len() && !matches!(tokens[j].0, Token::Newline) {
+            j += 1;
+        }
+        if j < tokens.len() {
+            j += 1;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Literal blocks
+// ---------------------------------------------------------------------------
+
+/// Check whether position `i` starts a literal delimiter line.
+///
+/// A literal delimiter is 4 or more consecutive `Dot` tokens with nothing
+/// else on the line (followed by `Newline` or end-of-tokens). Returns the
+/// index past the delimiter (past the `Newline` if present).
+pub(super) fn is_literal_delimiter(tokens: &[Spanned<'_>], i: usize) -> Option<usize> {
+    if i + 3 >= tokens.len() {
+        return None;
+    }
+    let mut j = i;
+    while j < tokens.len() && matches!(tokens[j].0, Token::Dot) {
+        j += 1;
+    }
+    if j - i < 4 {
+        return None;
+    }
+    // Must be followed by Newline or be at end-of-tokens.
+    if j < tokens.len() && !matches!(tokens[j].0, Token::Newline) {
+        return None;
+    }
+    if j < tokens.len() {
+        j += 1;
+    }
+    Some(j)
+}
+
+/// Try to parse a delimited literal block starting at position `i`.
+///
+/// Returns `Some((block, next_index))` if a complete literal block (opening
+/// **and** matching closing delimiter) is found, or `None` otherwise.
+pub(super) fn try_literal<'src>(
+    tokens: &[Spanned<'src>],
+    i: usize,
+    source: &'src str,
+    idx: &SourceIndex,
+) -> Option<(Block<'src>, usize)> {
+    let content_start = is_literal_delimiter(tokens, i)?;
+
+    // Count opening dots to match against the closing delimiter.
+    let mut delim_end_tok = i;
+    while delim_end_tok < tokens.len() && matches!(tokens[delim_end_tok].0, Token::Dot) {
+        delim_end_tok += 1;
+    }
+    let open_dot_count = delim_end_tok - i;
+    let delimiter = &source[tokens[i].1.start..tokens[delim_end_tok - 1].1.end];
+
+    // Scan line-by-line for a matching closing delimiter.
+    let mut j = content_start;
+    loop {
+        if j >= tokens.len() {
+            // No closing delimiter found.
+            return None;
+        }
+        // Check for closing delimiter at start of this line.
+        if let Some(after_close) = is_literal_delimiter(tokens, j) {
+            let mut k = j;
+            while k < tokens.len() && matches!(tokens[k].0, Token::Dot) {
+                k += 1;
+            }
+            if k - j == open_dot_count {
+                // Matching closing delimiter found.
+
+                // Content tokens are content_start..before the Newline preceding
+                // the closing delimiter.
+                let content_end = if j > content_start && matches!(tokens[j - 1].0, Token::Newline)
+                {
+                    j - 1
+                } else {
+                    j
+                };
+
+                // Build inlines: only create a text node if there's actual content.
+                let inlines = if content_start < content_end {
+                    let start_byte = tokens[content_start].1.start;
+                    let end_byte = tokens[content_end - 1].1.end;
+                    let span = SourceSpan {
+                        start: start_byte,
+                        end: end_byte,
+                    };
+                    vec![InlineNode::Text(TextNode {
+                        value: &source[start_byte..end_byte],
+                        location: Some(idx.location(&span)),
+                    })]
+                } else {
+                    vec![]
+                };
+
+                // Block location: opening delimiter through closing delimiter.
+                let block_span = SourceSpan {
+                    start: tokens[i].1.start,
+                    end: tokens[k - 1].1.end,
+                };
+
+                let block = Block {
+                    name: "literal",
                     form: Some("delimited"),
                     delimiter: Some(delimiter),
                     id: None,

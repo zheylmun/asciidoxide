@@ -95,6 +95,20 @@ pub(super) fn try_block_title<'src>(
         return None;
     }
 
+    // Check if this is a literal block delimiter (4+ dots on a line).
+    // A literal delimiter is all Dot tokens, and we already have one dot,
+    // so if the rest of the line is 3+ more dots, this is a literal delimiter.
+    let mut dot_count = 1; // We already matched the first dot
+    let mut j = content_start;
+    while j < line_end && matches!(tokens[j].0, Token::Dot) {
+        dot_count += 1;
+        j += 1;
+    }
+    // If the entire line is 4+ dots, it's a literal delimiter, not a title.
+    if dot_count >= 4 && j == line_end {
+        return None;
+    }
+
     // Parse the title content.
     let title_tokens = &tokens[content_start..line_end];
     let (inlines, diagnostics) = run_inline_parser(title_tokens, source, idx);

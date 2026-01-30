@@ -543,7 +543,6 @@ const UNSUPPORTED: &[&str] = &[
     "block/listing/listing-explicit-style-not-promoted",
     "block/listing/listing-strip-blank-lines",
     "block/listing/source-block-promoted",
-    "block/literal/",
     "block/metadata/",
     "block/passthrough/passthrough-strip-blank-lines",
     "block/quote/",
