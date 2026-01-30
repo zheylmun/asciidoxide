@@ -9,13 +9,13 @@ mod metadata;
 mod paragraphs;
 mod sections;
 
-use super::{content_span, strip_trailing_newline_index, strip_trailing_newlines, Spanned};
+use super::{Spanned, content_span, strip_trailing_newline_index, strip_trailing_newlines};
 use crate::asg::{Block, InlineNode};
 use crate::diagnostic::ParseDiagnostic;
 use crate::span::SourceIndex;
 use crate::token::Token;
 
-pub(super) use attributes::{extract_header, HeaderResult};
+pub(super) use attributes::{HeaderResult, extract_header};
 
 use breaks::try_break;
 use comments::{is_line_comment, try_skip_block_comment};

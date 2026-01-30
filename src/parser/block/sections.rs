@@ -1,9 +1,9 @@
 //! Section heading parsing.
 
-use super::{build_blocks, content_span, Spanned};
-use crate::parser::inline::run_inline_parser;
+use super::{Spanned, build_blocks, content_span};
 use crate::asg::Block;
 use crate::diagnostic::ParseDiagnostic;
+use crate::parser::inline::run_inline_parser;
 use crate::span::SourceIndex;
 use crate::token::Token;
 

@@ -2,10 +2,10 @@
 
 use super::delimited::{try_example, try_listing, try_open, try_sidebar};
 use super::paragraphs::find_paragraph_end;
-use super::{comments::try_skip_block_comment, Spanned};
-use crate::parser::inline::run_inline_parser;
+use super::{Spanned, comments::try_skip_block_comment};
 use crate::asg::InlineNode;
 use crate::diagnostic::ParseDiagnostic;
+use crate::parser::inline::run_inline_parser;
 use crate::span::SourceIndex;
 use crate::token::Token;
 

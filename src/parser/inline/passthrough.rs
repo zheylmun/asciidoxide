@@ -88,7 +88,11 @@ where
         .then(just(Token::Plus))
         .then(just(Token::Plus))
         .ignore_then(raw_content)
-        .then_ignore(just(Token::Plus).then(just(Token::Plus)).then(just(Token::Plus)))
+        .then_ignore(
+            just(Token::Plus)
+                .then(just(Token::Plus))
+                .then(just(Token::Plus)),
+        )
         .map_with(move |_toks, e| {
             let span: SourceSpan = e.span();
             // Extract content between delimiters (skip first 3 and last 3 bytes)

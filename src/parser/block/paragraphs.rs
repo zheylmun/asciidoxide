@@ -8,10 +8,10 @@ use super::delimited::{
 };
 use super::lists::is_list_item;
 use super::sections::is_section_heading;
-use super::{content_span, strip_trailing_newline_index, Spanned};
-use crate::parser::inline::run_inline_parser;
+use super::{Spanned, content_span, strip_trailing_newline_index};
 use crate::asg::Block;
 use crate::diagnostic::ParseDiagnostic;
+use crate::parser::inline::run_inline_parser;
 use crate::span::SourceIndex;
 use crate::token::Token;
 

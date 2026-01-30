@@ -12,7 +12,7 @@ use crate::diagnostic::{ParseDiagnostic, Severity};
 use crate::span::{SourceIndex, SourceSpan};
 use crate::token::Token;
 
-use macros::{find_inline_macros, preprocess_escaped_unconstrained, MacroType};
+use macros::{MacroType, find_inline_macros, preprocess_escaped_unconstrained};
 use passthrough::{inline_literal_parsers, triple_plus_passthrough_parser};
 use span::{
     code_span_parsers, emphasis_span_parsers, escaped_delimiter_parser, mark_span_parsers,

@@ -1,9 +1,9 @@
 //! List parsing (unordered lists).
 
 use super::Spanned;
-use crate::parser::inline::run_inline_parser;
 use crate::asg::Block;
 use crate::diagnostic::ParseDiagnostic;
+use crate::parser::inline::run_inline_parser;
 use crate::span::{SourceIndex, SourceSpan};
 use crate::token::Token;
 
