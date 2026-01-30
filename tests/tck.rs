@@ -545,7 +545,7 @@ const UNSUPPORTED: &[&str] = &[
     "block/listing/source-block-promoted",
     "block/literal/",
     "block/metadata/",
-    "block/passthrough/",
+    "block/passthrough/passthrough-strip-blank-lines",
     "block/quote/",
     "block/section/appendix-section",
     "block/section/discrete-heading",

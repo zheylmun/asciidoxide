@@ -19,7 +19,9 @@ pub(super) use attributes::{HeaderResult, extract_header};
 
 use breaks::try_break;
 use comments::{is_line_comment, try_skip_block_comment};
-use delimited::{try_example, try_fenced_code, try_listing, try_open, try_sidebar};
+use delimited::{
+    try_example, try_fenced_code, try_listing, try_open, try_passthrough, try_sidebar,
+};
 use lists::try_list;
 use metadata::{is_block_attribute_line, skip_comment_block, try_block_title};
 use paragraphs::{find_paragraph_end, make_paragraph};
@@ -30,6 +32,7 @@ use sections::try_section;
 /// Scans tokens linearly, detecting delimited blocks (e.g., listing) before
 /// falling back to paragraph collection. Blocks are separated by blank lines
 /// (two or more consecutive `Newline` tokens).
+#[allow(clippy::too_many_lines)]
 pub(super) fn build_blocks<'src>(
     tokens: &[Spanned<'src>],
     source: &'src str,
@@ -127,6 +130,14 @@ pub(super) fn build_blocks<'src>(
         if let Some((block, next, diags)) = try_open(tokens, i, source, idx) {
             blocks.push(block);
             diagnostics.extend(diags);
+            pending_title = None;
+            i = next;
+            continue;
+        }
+
+        // Try delimited passthrough block.
+        if let Some((block, next)) = try_passthrough(tokens, i, source, idx) {
+            blocks.push(block);
             pending_title = None;
             i = next;
             continue;
