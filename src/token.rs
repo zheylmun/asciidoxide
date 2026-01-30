@@ -103,6 +103,38 @@ pub enum Token<'a> {
     /// is never produced by the lexer — it is injected by the inline parser
     /// to let chumsky match span delimiters across macro boundaries.
     Placeholder(usize),
+
+    /// An escaped star delimiter (`\**` → `StarEscaped *`).
+    ///
+    /// This variant is injected during inline preprocessing when an escaped
+    /// unconstrained delimiter is detected. It acts like a `Star` for
+    /// constrained span matching but does not combine with an adjacent `Star`
+    /// to form an unconstrained delimiter.
+    StarEscaped,
+
+    /// An escaped underscore delimiter (`\__` → `UnderscoreEscaped _`).
+    UnderscoreEscaped,
+
+    /// An escaped backtick delimiter (`` \`` `` → `BacktickEscaped \``).
+    BacktickEscaped,
+
+    /// An escaped hash delimiter (`\##` → `HashEscaped #`).
+    HashEscaped,
+
+    /// A star that should be treated as text only (from escaped unconstrained).
+    ///
+    /// After `\**`, the second star becomes `StarAsText` which renders as `*`
+    /// but cannot open a span (it's consumed as content text).
+    StarAsText,
+
+    /// An underscore that should be treated as text only (from escaped unconstrained).
+    UnderscoreAsText,
+
+    /// A backtick that should be treated as text only (from escaped unconstrained).
+    BacktickAsText,
+
+    /// A hash that should be treated as text only (from escaped unconstrained).
+    HashAsText,
 }
 
 impl std::fmt::Display for Token<'_> {
@@ -111,10 +143,12 @@ impl std::fmt::Display for Token<'_> {
             Token::Newline => write!(f, "newline"),
             Token::Whitespace => write!(f, "whitespace"),
             Token::Eq => write!(f, "'='"),
-            Token::Star => write!(f, "'*'"),
-            Token::Underscore => write!(f, "'_'"),
-            Token::Backtick => write!(f, "'`'"),
-            Token::Hash => write!(f, "'#'"),
+            Token::Star | Token::StarEscaped | Token::StarAsText => write!(f, "'*'"),
+            Token::Underscore | Token::UnderscoreEscaped | Token::UnderscoreAsText => {
+                write!(f, "'_'")
+            }
+            Token::Backtick | Token::BacktickEscaped | Token::BacktickAsText => write!(f, "'`'"),
+            Token::Hash | Token::HashEscaped | Token::HashAsText => write!(f, "'#'"),
             Token::Caret => write!(f, "'^'"),
             Token::Tilde => write!(f, "'~'"),
             Token::Plus => write!(f, "'+'"),

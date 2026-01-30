@@ -41,6 +41,9 @@ where
 ///
 /// Returns `(unconstrained, constrained)` — unconstrained must be tried first
 /// so that double-backtick delimiters are not consumed as two single backticks.
+///
+/// The constrained parser also accepts `BacktickEscaped` as an opener to handle
+/// escaped unconstrained delimiters (backslash followed by double backticks).
 fn code_span_parsers<'tokens, 'src: 'tokens, I>(
     source: &'src str,
     idx: &'tokens SourceIndex,
@@ -52,7 +55,7 @@ where
     I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
 {
     let code_content = any()
-        .filter(|t: &Token| !matches!(t, Token::Backtick))
+        .filter(|t: &Token| !matches!(t, Token::Backtick | Token::BacktickEscaped))
         .repeated()
         .at_least(1)
         .map_with(move |_toks, e| {
@@ -78,8 +81,12 @@ where
             })
         });
 
-    let constrained = code_content
-        .delimited_by(just(Token::Backtick), just(Token::Backtick))
+    // Constrained opener: Backtick or BacktickEscaped (for escaped unconstrained)
+    let constrained_opener = choice((just(Token::Backtick), just(Token::BacktickEscaped)));
+
+    let constrained = constrained_opener
+        .ignore_then(code_content)
+        .then_ignore(just(Token::Backtick))
         .map_with(move |inlines: Vec<InlineNode<'src>>, e| {
             let span: SourceSpan = e.span();
             InlineNode::Span(SpanNode {
@@ -98,6 +105,9 @@ where
 ///
 /// Returns `(unconstrained, constrained)` — unconstrained must be tried first
 /// so that double-star delimiters are not consumed as two single stars.
+///
+/// The constrained parser also accepts `StarEscaped` as an opener to handle
+/// escaped unconstrained delimiters (`\**`).
 fn strong_span_parsers<'tokens, 'src: 'tokens, I, P>(
     inner: P,
     idx: &'tokens SourceIndex,
@@ -130,8 +140,12 @@ where
             })
         });
 
-    let constrained = inner_content
-        .delimited_by(just(Token::Star), just(Token::Star))
+    // Constrained opener: Star or StarEscaped (for escaped unconstrained)
+    let constrained_opener = choice((just(Token::Star), just(Token::StarEscaped)));
+
+    let constrained = constrained_opener
+        .ignore_then(inner_content)
+        .then_ignore(just(Token::Star))
         .map_with(move |inlines: Vec<InlineNode<'src>>, e| {
             let span: SourceSpan = e.span();
             InlineNode::Span(SpanNode {
@@ -150,6 +164,9 @@ where
 ///
 /// Returns `(unconstrained, constrained)` — unconstrained must be tried first
 /// so that double-underscore delimiters are not consumed as two single underscores.
+///
+/// The constrained parser also accepts `UnderscoreEscaped` as an opener to handle
+/// escaped unconstrained delimiters (`\__`).
 fn emphasis_span_parsers<'tokens, 'src: 'tokens, I, P>(
     inner: P,
     idx: &'tokens SourceIndex,
@@ -182,8 +199,12 @@ where
             })
         });
 
-    let constrained = inner_content
-        .delimited_by(just(Token::Underscore), just(Token::Underscore))
+    // Constrained opener: Underscore or UnderscoreEscaped (for escaped unconstrained)
+    let constrained_opener = choice((just(Token::Underscore), just(Token::UnderscoreEscaped)));
+
+    let constrained = constrained_opener
+        .ignore_then(inner_content)
+        .then_ignore(just(Token::Underscore))
         .map_with(move |inlines: Vec<InlineNode<'src>>, e| {
             let span: SourceSpan = e.span();
             InlineNode::Span(SpanNode {
@@ -202,6 +223,9 @@ where
 ///
 /// Returns `(unconstrained, constrained)` — unconstrained must be tried first
 /// so that double-hash delimiters are not consumed as two single hashes.
+///
+/// The constrained parser also accepts `HashEscaped` as an opener to handle
+/// escaped unconstrained delimiters (`\##`).
 fn mark_span_parsers<'tokens, 'src: 'tokens, I, P>(
     inner: P,
     idx: &'tokens SourceIndex,
@@ -234,8 +258,12 @@ where
             })
         });
 
-    let constrained = inner_content
-        .delimited_by(just(Token::Hash), just(Token::Hash))
+    // Constrained opener: Hash or HashEscaped (for escaped unconstrained)
+    let constrained_opener = choice((just(Token::Hash), just(Token::HashEscaped)));
+
+    let constrained = constrained_opener
+        .ignore_then(inner_content)
+        .then_ignore(just(Token::Hash))
         .map_with(move |inlines: Vec<InlineNode<'src>>, e| {
             let span: SourceSpan = e.span();
             InlineNode::Span(SpanNode {
@@ -290,10 +318,14 @@ where
                 !matches!(
                     t,
                     Token::Star
+                        | Token::StarEscaped
                         | Token::Backslash
                         | Token::Backtick
+                        | Token::BacktickEscaped
                         | Token::Underscore
+                        | Token::UnderscoreEscaped
                         | Token::Hash
+                        | Token::HashEscaped
                         | Token::Placeholder(_)
                 )
             })
@@ -361,9 +393,13 @@ where
     let single_inline = single_inline_parser(source, idx, pre_parsed);
 
     let star_as_text = token_as_text(Token::Star, source, idx);
+    let star_escaped_as_text = token_as_text(Token::StarEscaped, source, idx);
     let backtick_as_text = token_as_text(Token::Backtick, source, idx);
+    let backtick_escaped_as_text = token_as_text(Token::BacktickEscaped, source, idx);
     let underscore_as_text = token_as_text(Token::Underscore, source, idx);
+    let underscore_escaped_as_text = token_as_text(Token::UnderscoreEscaped, source, idx);
     let hash_as_text = token_as_text(Token::Hash, source, idx);
+    let hash_escaped_as_text = token_as_text(Token::HashEscaped, source, idx);
 
     // Catch-all recovery: if all grammar branches fail on a token, consume
     // it as a text node. This emits the original parse error as a diagnostic
@@ -379,9 +415,13 @@ where
     choice((
         single_inline,
         star_as_text,
+        star_escaped_as_text,
         backtick_as_text,
+        backtick_escaped_as_text,
         underscore_as_text,
+        underscore_escaped_as_text,
         hash_as_text,
+        hash_escaped_as_text,
     ))
     .recover_with(via_parser(catch_all))
     .repeated()
@@ -584,6 +624,57 @@ fn try_bare_url<'src>(
     })
 }
 
+/// Preprocess the token stream to handle escaped unconstrained delimiters.
+///
+/// When `\**`, `\__`, `\`​`` ``, or `\##` is encountered, this replaces the three
+/// tokens with two special tokens:
+/// 1. An escaped opener (e.g., `StarEscaped`) for the first delimiter
+/// 2. A text-only variant (e.g., `StarAsText`) for the second delimiter
+///
+/// The escaped opener can start a constrained span, while the text-only variant
+/// will be consumed as content text (it cannot open a nested span).
+///
+/// This implements the `AsciiDoc` spec rule that "a backslash may cause a different
+/// markup sequence to be matched".
+///
+/// Returns a new token vector with the transformations applied.
+fn preprocess_escaped_unconstrained<'src>(tokens: &[Spanned<'src>]) -> Vec<Spanned<'src>> {
+    let mut result = Vec::with_capacity(tokens.len());
+    let mut i = 0;
+
+    while i < tokens.len() {
+        // Check for escaped unconstrained delimiter: \** \__ \`` \##
+        if i + 2 < tokens.len() && matches!(tokens[i].0, Token::Backslash) {
+            let (t1, t2) = (&tokens[i + 1].0, &tokens[i + 2].0);
+
+            let tokens_pair = match (t1, t2) {
+                (Token::Star, Token::Star) => Some((Token::StarEscaped, Token::StarAsText)),
+                (Token::Underscore, Token::Underscore) => {
+                    Some((Token::UnderscoreEscaped, Token::UnderscoreAsText))
+                }
+                (Token::Backtick, Token::Backtick) => {
+                    Some((Token::BacktickEscaped, Token::BacktickAsText))
+                }
+                (Token::Hash, Token::Hash) => Some((Token::HashEscaped, Token::HashAsText)),
+                _ => None,
+            };
+
+            if let Some((escaped, as_text)) = tokens_pair {
+                // Replace backslash + first delimiter with escaped opener.
+                result.push((escaped, tokens[i + 1].1));
+                // Replace second delimiter with text-only variant.
+                result.push((as_text, tokens[i + 2].1));
+                i += 3;
+                continue;
+            }
+        }
+        result.push(tokens[i].clone());
+        i += 1;
+    }
+
+    result
+}
+
 /// Run the inline parser on a token sub-slice, returning nodes and diagnostics.
 ///
 /// Detects inline macros (link, xref, bare URL) procedurally, replaces
@@ -598,6 +689,10 @@ pub(super) fn run_inline_parser<'tokens, 'src: 'tokens>(
     if tokens.is_empty() {
         return (Vec::new(), Vec::new());
     }
+
+    // First, preprocess escaped unconstrained delimiters.
+    let preprocessed = preprocess_escaped_unconstrained(tokens);
+    let tokens = &preprocessed[..];
 
     let macros = find_inline_macros(tokens, source);
 

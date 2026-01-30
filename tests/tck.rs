@@ -542,7 +542,6 @@ const UNSUPPORTED: &[&str] = &[
     "block/section/title-body",
     "block/stem/",
     "block/verse/",
-    "inline/escaped/escaped-unconstrained-strong",
     "inline/passthrough/",
 ];
 
