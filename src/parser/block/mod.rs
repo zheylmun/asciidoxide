@@ -28,12 +28,106 @@ use metadata::{is_block_attribute_line, skip_comment_block, try_block_title};
 use paragraphs::{find_paragraph_end, make_paragraph};
 use sections::try_section;
 
+/// Block parse result type alias for readability.
+type ParseResult<'src> = Option<(Block<'src>, usize, Vec<ParseDiagnostic>)>;
+
+/// Try to skip non-content elements (newlines, comments, attributes).
+///
+/// Returns `Some(next_pos)` if something was skipped, `None` otherwise.
+fn try_skip_non_content<'src>(
+    tokens: &[Spanned<'src>],
+    i: usize,
+    source: &'src str,
+    idx: &SourceIndex,
+) -> Option<usize> {
+    // Skip line comments (// ...).
+    if let Some(next) = is_line_comment(tokens, i) {
+        return Some(next);
+    }
+
+    // Skip block comments (////...////).
+    if let Some(next) = try_skip_block_comment(tokens, i) {
+        return Some(next);
+    }
+
+    // Handle block attribute lines (e.g., [abstract], [source,ruby], [comment]).
+    if let Some(attr) = is_block_attribute_line(tokens, i) {
+        // If [comment], skip the following block entirely.
+        if attr.is_comment {
+            return Some(skip_comment_block(tokens, attr.next, source, idx));
+        }
+        return Some(attr.next);
+    }
+
+    None
+}
+
+/// Try to parse verbatim blocks (listing, literal, fenced code, passthrough).
+fn try_verbatim_block<'src>(
+    tokens: &[Spanned<'src>],
+    i: usize,
+    source: &'src str,
+    idx: &SourceIndex,
+) -> ParseResult<'src> {
+    if let Some((block, next)) = try_listing(tokens, i, source, idx) {
+        return Some((block, next, vec![]));
+    }
+    if let Some((block, next)) = try_literal(tokens, i, source, idx) {
+        return Some((block, next, vec![]));
+    }
+    if let Some((block, next)) = try_fenced_code(tokens, i, source, idx) {
+        return Some((block, next, vec![]));
+    }
+    if let Some((block, next)) = try_passthrough(tokens, i, source, idx) {
+        return Some((block, next, vec![]));
+    }
+    None
+}
+
+/// Try to parse compound blocks (example, quote, sidebar, open).
+fn try_compound_block<'src>(
+    tokens: &[Spanned<'src>],
+    i: usize,
+    source: &'src str,
+    idx: &SourceIndex,
+    pending_title: Option<Vec<InlineNode<'src>>>,
+) -> ParseResult<'src> {
+    if let Some((block, next, diags)) = try_example(tokens, i, source, idx, pending_title) {
+        return Some((block, next, diags));
+    }
+    if let Some((block, next, diags)) = try_quote(tokens, i, source, idx) {
+        return Some((block, next, diags));
+    }
+    if let Some((block, next, diags)) = try_sidebar(tokens, i, source, idx) {
+        return Some((block, next, diags));
+    }
+    if let Some((block, next, diags)) = try_open(tokens, i, source, idx) {
+        return Some((block, next, diags));
+    }
+    None
+}
+
+/// Try to parse structural blocks (sections, lists).
+fn try_structural_block<'src>(
+    tokens: &[Spanned<'src>],
+    i: usize,
+    source: &'src str,
+    idx: &SourceIndex,
+) -> ParseResult<'src> {
+    if let Some((block, next, diags)) = try_section(tokens, i, source, idx) {
+        return Some((block, next, diags));
+    }
+    if let Some((block, next, diags)) = try_list(tokens, i, source, idx) {
+        return Some((block, next, diags));
+    }
+    None
+}
+
 /// Build block-level ASG nodes from a body token stream.
 ///
 /// Scans tokens linearly, detecting delimited blocks (e.g., listing) before
 /// falling back to paragraph collection. Blocks are separated by blank lines
 /// (two or more consecutive `Newline` tokens).
-#[allow(clippy::too_many_lines)]
 pub(super) fn build_blocks<'src>(
     tokens: &[Spanned<'src>],
     source: &'src str,
@@ -53,26 +147,10 @@ pub(super) fn build_blocks<'src>(
             break;
         }
 
-        // Skip line comments (// ...).
-        if let Some(next) = is_line_comment(tokens, i) {
+        // Skip non-content elements (comments, attributes).
+        if let Some(next) = try_skip_non_content(tokens, i, source, idx) {
+            pending_title = None;
             i = next;
-            continue;
-        }
-
-        // Skip block comments (////...////).
-        if let Some(next) = try_skip_block_comment(tokens, i) {
-            i = next;
-            continue;
-        }
-
-        // Handle block attribute lines (e.g., [abstract], [source,ruby], [comment]).
-        if let Some(attr) = is_block_attribute_line(tokens, i) {
-            i = attr.next;
-            // If [comment], skip the following block entirely.
-            if attr.is_comment {
-                i = skip_comment_block(tokens, i, source, idx);
-                pending_title = None;
-            }
             continue;
         }
 
@@ -92,33 +170,18 @@ pub(super) fn build_blocks<'src>(
             continue;
         }
 
-        // Try delimited listing block.
-        if let Some((block, next)) = try_listing(tokens, i, source, idx) {
+        // Try verbatim blocks.
+        if let Some((block, next, diags)) = try_verbatim_block(tokens, i, source, idx) {
             blocks.push(block);
+            diagnostics.extend(diags);
             pending_title = None;
             i = next;
             continue;
         }
 
-        // Try delimited literal block.
-        if let Some((block, next)) = try_literal(tokens, i, source, idx) {
-            blocks.push(block);
-            pending_title = None;
-            i = next;
-            continue;
-        }
-
-        // Try fenced code block (``` delimiters).
-        if let Some((block, next)) = try_fenced_code(tokens, i, source, idx) {
-            blocks.push(block);
-            pending_title = None;
-            i = next;
-            continue;
-        }
-
-        // Try delimited example block.
+        // Try compound blocks.
         if let Some((block, next, diags)) =
-            try_example(tokens, i, source, idx, pending_title.take())
+            try_compound_block(tokens, i, source, idx, pending_title.take())
         {
             blocks.push(block);
             diagnostics.extend(diags);
@@ -126,52 +189,8 @@ pub(super) fn build_blocks<'src>(
             continue;
         }
 
-        // Try delimited quote block.
-        if let Some((block, next, diags)) = try_quote(tokens, i, source, idx) {
-            blocks.push(block);
-            diagnostics.extend(diags);
-            pending_title = None;
-            i = next;
-            continue;
-        }
-
-        // Try delimited sidebar block.
-        if let Some((block, next, diags)) = try_sidebar(tokens, i, source, idx) {
-            blocks.push(block);
-            diagnostics.extend(diags);
-            pending_title = None;
-            i = next;
-            continue;
-        }
-
-        // Try delimited open block.
-        if let Some((block, next, diags)) = try_open(tokens, i, source, idx) {
-            blocks.push(block);
-            diagnostics.extend(diags);
-            pending_title = None;
-            i = next;
-            continue;
-        }
-
-        // Try delimited passthrough block.
-        if let Some((block, next)) = try_passthrough(tokens, i, source, idx) {
-            blocks.push(block);
-            pending_title = None;
-            i = next;
-            continue;
-        }
-
-        // Try section heading.
-        if let Some((block, next, diags)) = try_section(tokens, i, source, idx) {
-            blocks.push(block);
-            diagnostics.extend(diags);
-            pending_title = None;
-            i = next;
-            continue;
-        }
-
-        // Try unordered list.
-        if let Some((block, next, diags)) = try_list(tokens, i, source, idx) {
+        // Try structural blocks.
+        if let Some((block, next, diags)) = try_structural_block(tokens, i, source, idx) {
             blocks.push(block);
             diagnostics.extend(diags);
             pending_title = None;

@@ -7,6 +7,31 @@ use crate::parser::inline::run_inline_parser;
 use crate::span::{SourceIndex, SourceSpan};
 use crate::token::Token;
 
+/// List variant (unordered or ordered).
+#[derive(Clone, Copy)]
+enum ListVariant {
+    Unordered,
+    Ordered,
+}
+
+impl ListVariant {
+    /// Get the marker level for this list variant at position `i`.
+    fn marker_level(self, tokens: &[Spanned<'_>], i: usize) -> (usize, usize) {
+        match self {
+            Self::Unordered => unordered_marker_level(tokens, i),
+            Self::Ordered => ordered_marker_level(tokens, i),
+        }
+    }
+
+    /// Get the variant name as a static string.
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Unordered => "unordered",
+            Self::Ordered => "ordered",
+        }
+    }
+}
+
 /// Count consecutive star tokens at position `i`.
 fn count_stars(tokens: &[Spanned<'_>], i: usize) -> usize {
     let mut count = 0;
@@ -92,207 +117,133 @@ pub(super) fn try_list<'src>(
     let (ordered_level, _) = ordered_marker_level(tokens, i);
 
     if unordered_level > 0 {
-        let (block, next, diags, _span_end) =
-            parse_unordered_list(tokens, i, source, idx, unordered_level)?;
+        let (block, next, diags, _span_end) = parse_list(
+            tokens,
+            i,
+            source,
+            idx,
+            unordered_level,
+            ListVariant::Unordered,
+        )?;
         Some((block, next, diags))
     } else if ordered_level > 0 {
         let (block, next, diags, _span_end) =
-            parse_ordered_list(tokens, i, source, idx, ordered_level)?;
+            parse_list(tokens, i, source, idx, ordered_level, ListVariant::Ordered)?;
         Some((block, next, diags))
     } else {
         None
     }
 }
 
-/// Parse an unordered list at the given nesting level.
-/// Returns `(Block, next_token_pos, diagnostics, span_end_byte)`.
-#[allow(clippy::too_many_lines)]
-fn parse_unordered_list<'src>(
+/// Parse a single list item at the current level.
+///
+/// Returns `(Block, content_end, item_end_byte, diagnostics)`.
+fn parse_list_item<'src>(
     tokens: &[Spanned<'src>],
-    start: usize,
+    actual_start: usize,
+    current_level: usize,
     source: &'src str,
     idx: &SourceIndex,
-    level: usize,
-) -> Option<(Block<'src>, usize, Vec<ParseDiagnostic>, usize)> {
-    let mut items: Vec<Block<'src>> = Vec::new();
-    let mut diagnostics = Vec::new();
-    let mut j = start;
+) -> (Block<'src>, usize, usize, Vec<ParseDiagnostic>) {
+    let item_marker =
+        &source[tokens[actual_start].1.start..tokens[actual_start + current_level - 1].1.end];
+    let item_start = tokens[actual_start].1.start;
 
-    // Get the actual marker start position (skipping leading whitespace)
-    let (_, marker_start) = unordered_marker_level(tokens, start);
-    let list_span_start = tokens[marker_start].1.start;
-    let mut list_span_end = tokens[marker_start].1.end;
-    let marker = &source[tokens[marker_start].1.start..tokens[marker_start + level - 1].1.end];
-
-    while j < tokens.len() {
-        let (current_level, actual_start) = unordered_marker_level(tokens, j);
-
-        if current_level == 0 {
-            // Not a list item - end of list
-            break;
-        }
-
-        if current_level < level {
-            // Return to parent level
-            break;
-        }
-
-        if current_level > level {
-            // This is a nested list - it should be added to the previous item's blocks
-            // If there's no previous item, treat it as current level
-            if let Some(last_item) = items.last_mut() {
-                let (nested_list, next_pos, nested_diags, nested_span_end) =
-                    parse_unordered_list(tokens, j, source, idx, current_level)?;
-                diagnostics.extend(nested_diags);
-
-                // Add nested list to the last item's blocks
-                if last_item.blocks.is_none() {
-                    last_item.blocks = Some(Vec::new());
-                }
-                last_item.blocks.as_mut().unwrap().push(nested_list);
-
-                // Update the last item's location to include the nested content
-                if let Some(ref mut loc) = last_item.location
-                    && let Some(nested_loc) = last_item
-                        .blocks
-                        .as_ref()
-                        .and_then(|b| b.last())
-                        .and_then(|nested| nested.location.as_ref())
-                {
-                    loc[1] = nested_loc[1].clone();
-                }
-
-                // Update list span end using the byte offset from nested list
-                list_span_end = list_span_end.max(nested_span_end);
-
-                j = next_pos;
-                continue;
-            }
-        }
-
-        // Parse item at current level
-        let item_marker =
-            &source[tokens[actual_start].1.start..tokens[actual_start + current_level - 1].1.end];
-        let item_start = tokens[actual_start].1.start;
-
-        // Content starts after markers and whitespace
-        let content_start = actual_start + current_level + 1;
-        let mut content_end = content_start;
-        while content_end < tokens.len() && !matches!(tokens[content_end].0, Token::Newline) {
-            content_end += 1;
-        }
-
-        // Parse principal content through the inline parser
-        let content_tokens = &tokens[content_start..content_end];
-        let (principal, diags) = run_inline_parser(content_tokens, source, idx);
-        diagnostics.extend(diags);
-
-        // Item location: from the marker to the last content token
-        let item_end = if content_end > content_start {
-            tokens[content_end - 1].1.end
-        } else {
-            tokens[actual_start + current_level].1.end
-        };
-        let item_span = SourceSpan {
-            start: item_start,
-            end: item_end,
-        };
-
-        items.push({
-            let mut item = Block::new("listItem");
-            item.marker = Some(item_marker);
-            item.principal = Some(principal);
-            item.location = Some(idx.location(&item_span));
-            item
-        });
-
-        list_span_end = item_end;
-
-        // Advance past the Newline (if present)
-        j = if content_end < tokens.len() {
-            content_end + 1
-        } else {
-            content_end
-        };
+    // Content starts after markers and whitespace
+    let content_start = actual_start + current_level + 1;
+    let mut content_end = content_start;
+    while content_end < tokens.len() && !matches!(tokens[content_end].0, Token::Newline) {
+        content_end += 1;
     }
 
-    if items.is_empty() {
-        return None;
-    }
+    // Parse principal content through the inline parser
+    let content_tokens = &tokens[content_start..content_end];
+    let (principal, diagnostics) = run_inline_parser(content_tokens, source, idx);
 
-    let list_span = SourceSpan {
-        start: list_span_start,
-        end: list_span_end,
+    // Item location: from the marker to the last content token
+    let item_end = if content_end > content_start {
+        tokens[content_end - 1].1.end
+    } else {
+        tokens[actual_start + current_level].1.end
+    };
+    let item_span = SourceSpan {
+        start: item_start,
+        end: item_end,
     };
 
-    let mut list = Block::new("list");
-    list.variant = Some("unordered");
-    list.marker = Some(marker);
-    list.items = Some(items);
-    list.location = Some(idx.location(&list_span));
+    let mut item = Block::new("listItem");
+    item.marker = Some(item_marker);
+    item.principal = Some(principal);
+    item.location = Some(idx.location(&item_span));
 
-    Some((list, j, diagnostics, list_span_end))
+    (item, content_end, item_end, diagnostics)
 }
 
-/// Parse an ordered list at the given nesting level.
+/// Handle a nested list by adding it to the last item's blocks.
+fn handle_nested_list<'src>(
+    last_item: &mut Block<'src>,
+    nested_list: Block<'src>,
+    nested_span_end: usize,
+    list_span_end: &mut usize,
+) {
+    // Add nested list to the last item's blocks
+    if last_item.blocks.is_none() {
+        last_item.blocks = Some(Vec::new());
+    }
+    last_item.blocks.as_mut().unwrap().push(nested_list);
+
+    // Update the last item's location to include the nested content
+    if let Some(ref mut loc) = last_item.location
+        && let Some(nested_loc) = last_item
+            .blocks
+            .as_ref()
+            .and_then(|b| b.last())
+            .and_then(|nested| nested.location.as_ref())
+    {
+        loc[1] = nested_loc[1].clone();
+    }
+
+    // Update list span end using the byte offset from nested list
+    *list_span_end = (*list_span_end).max(nested_span_end);
+}
+
+/// Parse a list at the given nesting level.
+///
 /// Returns `(Block, next_token_pos, diagnostics, span_end_byte)`.
-#[allow(clippy::too_many_lines)]
-fn parse_ordered_list<'src>(
+fn parse_list<'src>(
     tokens: &[Spanned<'src>],
     start: usize,
     source: &'src str,
     idx: &SourceIndex,
     level: usize,
+    variant: ListVariant,
 ) -> Option<(Block<'src>, usize, Vec<ParseDiagnostic>, usize)> {
     let mut items: Vec<Block<'src>> = Vec::new();
     let mut diagnostics = Vec::new();
     let mut j = start;
 
     // Get the actual marker start position (skipping leading whitespace)
-    let (_, marker_start) = ordered_marker_level(tokens, start);
+    let (_, marker_start) = variant.marker_level(tokens, start);
     let list_span_start = tokens[marker_start].1.start;
     let mut list_span_end = tokens[marker_start].1.end;
     let marker = &source[tokens[marker_start].1.start..tokens[marker_start + level - 1].1.end];
 
     while j < tokens.len() {
-        let (current_level, actual_start) = ordered_marker_level(tokens, j);
+        let (current_level, actual_start) = variant.marker_level(tokens, j);
 
-        if current_level == 0 {
-            // Not a list item - end of list
-            break;
-        }
-
-        if current_level < level {
-            // Return to parent level
+        if current_level == 0 || current_level < level {
+            // Not a list item or return to parent level
             break;
         }
 
         if current_level > level {
-            // This is a nested list - it should be added to the previous item's blocks
+            // This is a nested list - add to the previous item's blocks
             if let Some(last_item) = items.last_mut() {
                 let (nested_list, next_pos, nested_diags, nested_span_end) =
-                    parse_ordered_list(tokens, j, source, idx, current_level)?;
+                    parse_list(tokens, j, source, idx, current_level, variant)?;
                 diagnostics.extend(nested_diags);
 
-                // Add nested list to the last item's blocks
-                if last_item.blocks.is_none() {
-                    last_item.blocks = Some(Vec::new());
-                }
-                last_item.blocks.as_mut().unwrap().push(nested_list);
-
-                // Update the last item's location to include the nested content
-                if let Some(ref mut loc) = last_item.location
-                    && let Some(nested_loc) = last_item
-                        .blocks
-                        .as_ref()
-                        .and_then(|b| b.last())
-                        .and_then(|nested| nested.location.as_ref())
-                {
-                    loc[1] = nested_loc[1].clone();
-                }
-
-                // Update list span end using the byte offset from nested list
-                list_span_end = list_span_end.max(nested_span_end);
+                handle_nested_list(last_item, nested_list, nested_span_end, &mut list_span_end);
 
                 j = next_pos;
                 continue;
@@ -300,40 +251,10 @@ fn parse_ordered_list<'src>(
         }
 
         // Parse item at current level
-        let item_marker =
-            &source[tokens[actual_start].1.start..tokens[actual_start + current_level - 1].1.end];
-        let item_start = tokens[actual_start].1.start;
-
-        // Content starts after markers and whitespace
-        let content_start = actual_start + current_level + 1;
-        let mut content_end = content_start;
-        while content_end < tokens.len() && !matches!(tokens[content_end].0, Token::Newline) {
-            content_end += 1;
-        }
-
-        // Parse principal content through the inline parser
-        let content_tokens = &tokens[content_start..content_end];
-        let (principal, diags) = run_inline_parser(content_tokens, source, idx);
-        diagnostics.extend(diags);
-
-        // Item location: from the marker to the last content token
-        let item_end = if content_end > content_start {
-            tokens[content_end - 1].1.end
-        } else {
-            tokens[actual_start + current_level].1.end
-        };
-        let item_span = SourceSpan {
-            start: item_start,
-            end: item_end,
-        };
-
-        items.push({
-            let mut item = Block::new("listItem");
-            item.marker = Some(item_marker);
-            item.principal = Some(principal);
-            item.location = Some(idx.location(&item_span));
-            item
-        });
+        let (item, content_end, item_end, item_diags) =
+            parse_list_item(tokens, actual_start, current_level, source, idx);
+        diagnostics.extend(item_diags);
+        items.push(item);
 
         list_span_end = item_end;
 
@@ -355,7 +276,7 @@ fn parse_ordered_list<'src>(
     };
 
     let mut list = Block::new("list");
-    list.variant = Some("ordered");
+    list.variant = Some(variant.name());
     list.marker = Some(marker);
     list.items = Some(items);
     list.location = Some(idx.location(&list_span));
