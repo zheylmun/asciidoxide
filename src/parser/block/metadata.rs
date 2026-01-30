@@ -109,6 +109,12 @@ pub(super) fn try_block_title<'src>(
         return None;
     }
 
+    // If content after the dot(s) starts with whitespace, this is an ordered
+    // list item (`. Item` or `.. Item`), not a block title.
+    if j < line_end && matches!(tokens[j].0, Token::Whitespace) {
+        return None;
+    }
+
     // Parse the title content.
     let title_tokens = &tokens[content_start..line_end];
     let (inlines, diagnostics) = run_inline_parser(title_tokens, source, idx);
