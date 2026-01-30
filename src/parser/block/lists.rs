@@ -198,23 +198,12 @@ fn parse_unordered_list<'src>(
             end: item_end,
         };
 
-        items.push(Block {
-            name: "listItem",
-            form: None,
-            delimiter: None,
-            id: None,
-            style: None,
-            reftext: None,
-            metadata: None,
-            title: None,
-            level: None,
-            variant: None,
-            marker: Some(item_marker),
-            inlines: None,
-            blocks: None,
-            items: None,
-            principal: Some(principal),
-            location: Some(idx.location(&item_span)),
+        items.push({
+            let mut item = Block::new("listItem");
+            item.marker = Some(item_marker);
+            item.principal = Some(principal);
+            item.location = Some(idx.location(&item_span));
+            item
         });
 
         list_span_end = item_end;
@@ -236,29 +225,13 @@ fn parse_unordered_list<'src>(
         end: list_span_end,
     };
 
-    Some((
-        Block {
-            name: "list",
-            form: None,
-            delimiter: None,
-            id: None,
-            style: None,
-            reftext: None,
-            metadata: None,
-            title: None,
-            level: None,
-            variant: Some("unordered"),
-            marker: Some(marker),
-            inlines: None,
-            blocks: None,
-            items: Some(items),
-            principal: None,
-            location: Some(idx.location(&list_span)),
-        },
-        j,
-        diagnostics,
-        list_span_end,
-    ))
+    let mut list = Block::new("list");
+    list.variant = Some("unordered");
+    list.marker = Some(marker);
+    list.items = Some(items);
+    list.location = Some(idx.location(&list_span));
+
+    Some((list, j, diagnostics, list_span_end))
 }
 
 /// Parse an ordered list at the given nesting level.
@@ -354,23 +327,12 @@ fn parse_ordered_list<'src>(
             end: item_end,
         };
 
-        items.push(Block {
-            name: "listItem",
-            form: None,
-            delimiter: None,
-            id: None,
-            style: None,
-            reftext: None,
-            metadata: None,
-            title: None,
-            level: None,
-            variant: None,
-            marker: Some(item_marker),
-            inlines: None,
-            blocks: None,
-            items: None,
-            principal: Some(principal),
-            location: Some(idx.location(&item_span)),
+        items.push({
+            let mut item = Block::new("listItem");
+            item.marker = Some(item_marker);
+            item.principal = Some(principal);
+            item.location = Some(idx.location(&item_span));
+            item
         });
 
         list_span_end = item_end;
@@ -392,27 +354,11 @@ fn parse_ordered_list<'src>(
         end: list_span_end,
     };
 
-    Some((
-        Block {
-            name: "list",
-            form: None,
-            delimiter: None,
-            id: None,
-            style: None,
-            reftext: None,
-            metadata: None,
-            title: None,
-            level: None,
-            variant: Some("ordered"),
-            marker: Some(marker),
-            inlines: None,
-            blocks: None,
-            items: Some(items),
-            principal: None,
-            location: Some(idx.location(&list_span)),
-        },
-        j,
-        diagnostics,
-        list_span_end,
-    ))
+    let mut list = Block::new("list");
+    list.variant = Some("ordered");
+    list.marker = Some(marker);
+    list.items = Some(items);
+    list.location = Some(idx.location(&list_span));
+
+    Some((list, j, diagnostics, list_span_end))
 }

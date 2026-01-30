@@ -131,6 +131,31 @@ pub struct Block<'a> {
     pub location: Option<Location>,
 }
 
+impl Block<'_> {
+    /// Creates a new block with the given name and all optional fields set to `None`.
+    #[must_use]
+    pub fn new(name: &'static str) -> Self {
+        Self {
+            name,
+            form: None,
+            delimiter: None,
+            id: None,
+            style: None,
+            reftext: None,
+            metadata: None,
+            title: None,
+            level: None,
+            variant: None,
+            marker: None,
+            inlines: None,
+            blocks: None,
+            items: None,
+            principal: None,
+            location: None,
+        }
+    }
+}
+
 /// An inline ASG node — text, formatting span, reference, or raw passthrough.
 #[derive(Debug, Clone, PartialEq)]
 pub enum InlineNode<'a> {

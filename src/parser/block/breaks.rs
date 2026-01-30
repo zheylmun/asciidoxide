@@ -71,27 +71,10 @@ pub(super) fn try_break<'src>(
             start: tokens[i].1.start,
             end: tokens[i + 2].1.end,
         };
-        return Some((
-            Block {
-                name: "break",
-                form: None,
-                delimiter: None,
-                id: None,
-                style: None,
-                reftext: None,
-                metadata: None,
-                title: None,
-                level: None,
-                variant: Some("thematic"),
-                marker: None,
-                inlines: None,
-                blocks: None,
-                items: None,
-                principal: None,
-                location: Some(idx.location(&span)),
-            },
-            next,
-        ));
+        let mut block = Block::new("break");
+        block.variant = Some("thematic");
+        block.location = Some(idx.location(&span));
+        return Some((block, next));
     }
 
     // Try page break (<<<)
@@ -100,27 +83,10 @@ pub(super) fn try_break<'src>(
             start: tokens[i].1.start,
             end: tokens[i + 1].1.end,
         };
-        return Some((
-            Block {
-                name: "break",
-                form: None,
-                delimiter: None,
-                id: None,
-                style: None,
-                reftext: None,
-                metadata: None,
-                title: None,
-                level: None,
-                variant: Some("page"),
-                marker: None,
-                inlines: None,
-                blocks: None,
-                items: None,
-                principal: None,
-                location: Some(idx.location(&span)),
-            },
-            next,
-        ));
+        let mut block = Block::new("break");
+        block.variant = Some("page");
+        block.location = Some(idx.location(&span));
+        return Some((block, next));
     }
 
     None

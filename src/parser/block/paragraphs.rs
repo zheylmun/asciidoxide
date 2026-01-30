@@ -73,25 +73,9 @@ pub(super) fn make_paragraph<'src>(
     let span = content_span(trimmed);
     let location = span.map(|s| idx.location(&s));
 
-    (
-        Block {
-            name: "paragraph",
-            form: None,
-            delimiter: None,
-            id: None,
-            style: None,
-            reftext: None,
-            metadata: None,
-            title: None,
-            level: None,
-            variant: None,
-            marker: None,
-            inlines: Some(inlines),
-            blocks: None,
-            items: None,
-            principal: None,
-            location,
-        },
-        diagnostics,
-    )
+    let mut paragraph = Block::new("paragraph");
+    paragraph.inlines = Some(inlines);
+    paragraph.location = location;
+
+    (paragraph, diagnostics)
 }

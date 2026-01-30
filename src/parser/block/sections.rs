@@ -73,26 +73,11 @@ pub(super) fn try_section<'src>(
     let section_span = content_span(section_tokens);
     let section_location = section_span.map(|s| idx.location(&s));
 
-    Some((
-        Block {
-            name: "section",
-            form: None,
-            delimiter: None,
-            id: None,
-            style: None,
-            reftext: None,
-            metadata: None,
-            title: Some(title_inlines),
-            level: Some(level),
-            variant: None,
-            marker: None,
-            inlines: None,
-            blocks: Some(body_blocks),
-            items: None,
-            principal: None,
-            location: section_location,
-        },
-        section_end,
-        diagnostics,
-    ))
+    let mut section = Block::new("section");
+    section.title = Some(title_inlines);
+    section.level = Some(level);
+    section.blocks = Some(body_blocks);
+    section.location = section_location;
+
+    Some((section, section_end, diagnostics))
 }

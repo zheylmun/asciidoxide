@@ -81,28 +81,13 @@ pub(super) fn try_open<'src>(
                 end: tokens[j + 1].1.end,
             };
 
-            return Some((
-                Block {
-                    name: "open",
-                    form: Some("delimited"),
-                    delimiter: Some(delimiter),
-                    id: None,
-                    style: None,
-                    reftext: None,
-                    metadata: None,
-                    title: None,
-                    level: None,
-                    variant: None,
-                    marker: None,
-                    inlines: None,
-                    blocks: Some(body_blocks),
-                    items: None,
-                    principal: None,
-                    location: Some(idx.location(&block_span)),
-                },
-                after_close,
-                body_diags,
-            ));
+            let mut block = Block::new("open");
+            block.form = Some("delimited");
+            block.delimiter = Some(delimiter);
+            block.blocks = Some(body_blocks);
+            block.location = Some(idx.location(&block_span));
+
+            return Some((block, after_close, body_diags));
         }
         // Advance to the next line.
         while j < tokens.len() && !matches!(tokens[j].0, Token::Newline) {
@@ -211,24 +196,11 @@ pub(super) fn try_fenced_code<'src>(
                     end: tokens[k - 1].1.end,
                 };
 
-                let block = Block {
-                    name: "listing",
-                    form: Some("delimited"),
-                    delimiter: Some(delimiter),
-                    id: None,
-                    style: None,
-                    reftext: None,
-                    metadata: None,
-                    title: None,
-                    level: None,
-                    variant: None,
-                    marker: None,
-                    inlines: Some(inlines),
-                    blocks: None,
-                    items: None,
-                    principal: None,
-                    location: Some(idx.location(&block_span)),
-                };
+                let mut block = Block::new("listing");
+                block.form = Some("delimited");
+                block.delimiter = Some(delimiter);
+                block.inlines = Some(inlines);
+                block.location = Some(idx.location(&block_span));
 
                 return Some((block, after_close));
             }
@@ -340,24 +312,11 @@ pub(super) fn try_listing<'src>(
                     end: tokens[k - 1].1.end,
                 };
 
-                let block = Block {
-                    name: "listing",
-                    form: Some("delimited"),
-                    delimiter: Some(delimiter),
-                    id: None,
-                    style: None,
-                    reftext: None,
-                    metadata: None,
-                    title: None,
-                    level: None,
-                    variant: None,
-                    marker: None,
-                    inlines: Some(inlines),
-                    blocks: None,
-                    items: None,
-                    principal: None,
-                    location: Some(idx.location(&block_span)),
-                };
+                let mut block = Block::new("listing");
+                block.form = Some("delimited");
+                block.delimiter = Some(delimiter);
+                block.inlines = Some(inlines);
+                block.location = Some(idx.location(&block_span));
 
                 return Some((block, after_close));
             }
@@ -469,24 +428,11 @@ pub(super) fn try_literal<'src>(
                     end: tokens[k - 1].1.end,
                 };
 
-                let block = Block {
-                    name: "literal",
-                    form: Some("delimited"),
-                    delimiter: Some(delimiter),
-                    id: None,
-                    style: None,
-                    reftext: None,
-                    metadata: None,
-                    title: None,
-                    level: None,
-                    variant: None,
-                    marker: None,
-                    inlines: Some(inlines),
-                    blocks: None,
-                    items: None,
-                    principal: None,
-                    location: Some(idx.location(&block_span)),
-                };
+                let mut block = Block::new("literal");
+                block.form = Some("delimited");
+                block.delimiter = Some(delimiter);
+                block.inlines = Some(inlines);
+                block.location = Some(idx.location(&block_span));
 
                 return Some((block, after_close));
             }
@@ -585,28 +531,14 @@ pub(super) fn try_example<'src>(
                     end: tokens[k - 1].1.end,
                 };
 
-                return Some((
-                    Block {
-                        name: "example",
-                        form: Some("delimited"),
-                        delimiter: Some(delimiter),
-                        id: None,
-                        style: None,
-                        reftext: None,
-                        metadata: None,
-                        title,
-                        level: None,
-                        variant: None,
-                        marker: None,
-                        inlines: None,
-                        blocks: Some(body_blocks),
-                        items: None,
-                        principal: None,
-                        location: Some(idx.location(&block_span)),
-                    },
-                    after_close,
-                    body_diags,
-                ));
+                let mut block = Block::new("example");
+                block.form = Some("delimited");
+                block.delimiter = Some(delimiter);
+                block.title = title;
+                block.blocks = Some(body_blocks);
+                block.location = Some(idx.location(&block_span));
+
+                return Some((block, after_close, body_diags));
             }
         }
         // Advance to the next line.
@@ -702,28 +634,13 @@ pub(super) fn try_quote<'src>(
                     end: tokens[k - 1].1.end,
                 };
 
-                return Some((
-                    Block {
-                        name: "quote",
-                        form: Some("delimited"),
-                        delimiter: Some(delimiter),
-                        id: None,
-                        style: None,
-                        reftext: None,
-                        metadata: None,
-                        title: None,
-                        level: None,
-                        variant: None,
-                        marker: None,
-                        inlines: None,
-                        blocks: Some(body_blocks),
-                        items: None,
-                        principal: None,
-                        location: Some(idx.location(&block_span)),
-                    },
-                    after_close,
-                    body_diags,
-                ));
+                let mut block = Block::new("quote");
+                block.form = Some("delimited");
+                block.delimiter = Some(delimiter);
+                block.blocks = Some(body_blocks);
+                block.location = Some(idx.location(&block_span));
+
+                return Some((block, after_close, body_diags));
             }
         }
         // Advance to the next line.
@@ -819,28 +736,13 @@ pub(super) fn try_sidebar<'src>(
                     end: tokens[k - 1].1.end,
                 };
 
-                return Some((
-                    Block {
-                        name: "sidebar",
-                        form: Some("delimited"),
-                        delimiter: Some(delimiter),
-                        id: None,
-                        style: None,
-                        reftext: None,
-                        metadata: None,
-                        title: None,
-                        level: None,
-                        variant: None,
-                        marker: None,
-                        inlines: None,
-                        blocks: Some(body_blocks),
-                        items: None,
-                        principal: None,
-                        location: Some(idx.location(&block_span)),
-                    },
-                    after_close,
-                    body_diags,
-                ));
+                let mut block = Block::new("sidebar");
+                block.form = Some("delimited");
+                block.delimiter = Some(delimiter);
+                block.blocks = Some(body_blocks);
+                block.location = Some(idx.location(&block_span));
+
+                return Some((block, after_close, body_diags));
             }
         }
         // Advance to the next line.
@@ -951,24 +853,11 @@ pub(super) fn try_passthrough<'src>(
                     end: tokens[k - 1].1.end,
                 };
 
-                let block = Block {
-                    name: "pass",
-                    form: Some("delimited"),
-                    delimiter: Some(delimiter),
-                    id: None,
-                    style: None,
-                    reftext: None,
-                    metadata: None,
-                    title: None,
-                    level: None,
-                    variant: None,
-                    marker: None,
-                    inlines: Some(inlines),
-                    blocks: None,
-                    items: None,
-                    principal: None,
-                    location: Some(idx.location(&block_span)),
-                };
+                let mut block = Block::new("pass");
+                block.form = Some("delimited");
+                block.delimiter = Some(delimiter);
+                block.inlines = Some(inlines);
+                block.location = Some(idx.location(&block_span));
 
                 return Some((block, after_close));
             }
