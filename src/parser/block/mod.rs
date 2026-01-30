@@ -24,22 +24,18 @@ use delimited::{
     try_sidebar,
 };
 use lists::try_list;
-use metadata::{is_block_attribute_line, skip_comment_block, try_block_title};
+use metadata::{BlockAttrs, is_block_attribute_line, skip_comment_block, try_block_title};
 use paragraphs::{find_paragraph_end, make_paragraph};
-use sections::try_section;
+use sections::{try_discrete_heading, try_section};
 
 /// Block parse result type alias for readability.
 type ParseResult<'src> = Option<(Block<'src>, usize, Vec<ParseDiagnostic>)>;
 
-/// Try to skip non-content elements (newlines, comments, attributes).
+/// Try to skip pure non-content elements (newlines, comments).
 ///
 /// Returns `Some(next_pos)` if something was skipped, `None` otherwise.
-fn try_skip_non_content<'src>(
-    tokens: &[Spanned<'src>],
-    i: usize,
-    source: &'src str,
-    idx: &SourceIndex,
-) -> Option<usize> {
+/// Note: Block attributes are handled separately to track pending attrs.
+fn try_skip_comment(tokens: &[Spanned<'_>], i: usize) -> Option<usize> {
     // Skip line comments (// ...).
     if let Some(next) = is_line_comment(tokens, i) {
         return Some(next);
@@ -48,15 +44,6 @@ fn try_skip_non_content<'src>(
     // Skip block comments (////...////).
     if let Some(next) = try_skip_block_comment(tokens, i) {
         return Some(next);
-    }
-
-    // Handle block attribute lines (e.g., [abstract], [source,ruby], [comment]).
-    if let Some(attr) = is_block_attribute_line(tokens, i) {
-        // If [comment], skip the following block entirely.
-        if attr.is_comment {
-            return Some(skip_comment_block(tokens, attr.next, source, idx));
-        }
-        return Some(attr.next);
     }
 
     None
@@ -113,8 +100,9 @@ fn try_structural_block<'src>(
     i: usize,
     source: &'src str,
     idx: &SourceIndex,
+    pending_attrs: Option<&BlockAttrs<'src>>,
 ) -> ParseResult<'src> {
-    if let Some((block, next, diags)) = try_section(tokens, i, source, idx) {
+    if let Some((block, next, diags)) = try_section(tokens, i, source, idx, pending_attrs) {
         return Some((block, next, diags));
     }
     if let Some((block, next, diags)) = try_list(tokens, i, source, idx) {
@@ -137,6 +125,7 @@ pub(super) fn build_blocks<'src>(
     let mut diagnostics = Vec::new();
     let mut i = 0;
     let mut pending_title: Option<Vec<InlineNode<'src>>> = None;
+    let mut pending_attrs: Option<BlockAttrs<'src>> = None;
 
     while i < tokens.len() {
         // Skip inter-block newlines.
@@ -147,10 +136,26 @@ pub(super) fn build_blocks<'src>(
             break;
         }
 
-        // Skip non-content elements (comments, attributes).
-        if let Some(next) = try_skip_non_content(tokens, i, source, idx) {
+        // Skip comments.
+        if let Some(next) = try_skip_comment(tokens, i) {
             pending_title = None;
+            pending_attrs = None;
             i = next;
+            continue;
+        }
+
+        // Handle block attribute lines (e.g., [abstract], [source,ruby], [comment]).
+        if let Some(attr_result) = is_block_attribute_line(tokens, i, source) {
+            // If [comment], skip the following block entirely.
+            if attr_result.attrs.is_comment() {
+                pending_title = None;
+                pending_attrs = None;
+                i = skip_comment_block(tokens, attr_result.next, source, idx);
+                continue;
+            }
+            // Store attributes for the next block.
+            pending_attrs = Some(attr_result.attrs);
+            i = attr_result.next;
             continue;
         }
 
@@ -166,6 +171,19 @@ pub(super) fn build_blocks<'src>(
         if let Some((block, next)) = try_break(tokens, i, idx) {
             blocks.push(block);
             pending_title = None;
+            pending_attrs = None;
+            i = next;
+            continue;
+        }
+
+        // Try discrete heading (section with [discrete] style).
+        if let Some((block, next, diags)) =
+            try_discrete_heading(tokens, i, source, idx, pending_attrs.as_ref())
+        {
+            blocks.push(block);
+            diagnostics.extend(diags);
+            pending_title = None;
+            pending_attrs = None;
             i = next;
             continue;
         }
@@ -175,6 +193,7 @@ pub(super) fn build_blocks<'src>(
             blocks.push(block);
             diagnostics.extend(diags);
             pending_title = None;
+            pending_attrs = None;
             i = next;
             continue;
         }
@@ -185,15 +204,19 @@ pub(super) fn build_blocks<'src>(
         {
             blocks.push(block);
             diagnostics.extend(diags);
+            pending_attrs = None;
             i = next;
             continue;
         }
 
         // Try structural blocks.
-        if let Some((block, next, diags)) = try_structural_block(tokens, i, source, idx) {
+        if let Some((block, next, diags)) =
+            try_structural_block(tokens, i, source, idx, pending_attrs.as_ref())
+        {
             blocks.push(block);
             diagnostics.extend(diags);
             pending_title = None;
+            pending_attrs = None;
             i = next;
             continue;
         }
@@ -206,6 +229,7 @@ pub(super) fn build_blocks<'src>(
             diagnostics.extend(diags);
         }
         pending_title = None;
+        pending_attrs = None;
         i = para_end;
     }
 
