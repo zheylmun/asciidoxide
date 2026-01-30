@@ -2,6 +2,7 @@
 
 mod attributes;
 mod breaks;
+mod chumsky_parser;
 mod combinators;
 mod comments;
 mod delimited;
