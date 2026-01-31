@@ -617,10 +617,14 @@ pub(super) fn build_blocks_chumsky<'src>(
     source: &'src str,
     idx: &SourceIndex,
 ) -> (Vec<Block<'src>>, Vec<ParseDiagnostic>) {
+    use super::metadata::{BlockAttrs, is_block_attribute_line, skip_comment_block};
+    use super::sections::try_discrete_heading;
+
     let mut blocks = Vec::new();
     let mut diagnostics = Vec::new();
     let mut i = 0;
     let mut pending_title: Option<Vec<InlineNode<'src>>> = None;
+    let mut pending_attrs: Option<BlockAttrs<'src>> = None;
 
     while i < tokens.len() {
         // Skip inter-block newlines.
@@ -634,6 +638,7 @@ pub(super) fn build_blocks_chumsky<'src>(
         // Skip line comments.
         if let Some(next) = super::comments::is_line_comment(tokens, i) {
             pending_title = None;
+            pending_attrs = None;
             i = next;
             continue;
         }
@@ -641,7 +646,23 @@ pub(super) fn build_blocks_chumsky<'src>(
         // Skip block comments.
         if let Some(next) = super::comments::try_skip_block_comment(tokens, i) {
             pending_title = None;
+            pending_attrs = None;
             i = next;
+            continue;
+        }
+
+        // Handle block attribute lines (e.g., [abstract], [source,ruby], [comment]).
+        if let Some(attr_result) = is_block_attribute_line(tokens, i, source) {
+            // If [comment], skip the following block entirely.
+            if attr_result.attrs.is_comment() {
+                pending_title = None;
+                pending_attrs = None;
+                i = skip_comment_block(tokens, attr_result.next, source, idx);
+                continue;
+            }
+            // Store attributes for the next block.
+            pending_attrs = Some(attr_result.attrs);
+            i = attr_result.next;
             continue;
         }
 
@@ -657,6 +678,19 @@ pub(super) fn build_blocks_chumsky<'src>(
         if let Some((block, next)) = super::breaks::try_break(tokens, i, idx) {
             blocks.push(block);
             pending_title = None;
+            pending_attrs = None;
+            i = next;
+            continue;
+        }
+
+        // Try discrete heading (section with [discrete] style).
+        if let Some((block, next, diags)) =
+            try_discrete_heading(tokens, i, source, idx, pending_attrs.as_ref())
+        {
+            blocks.push(block);
+            diagnostics.extend(diags);
+            pending_title = None;
+            pending_attrs = None;
             i = next;
             continue;
         }
@@ -665,24 +699,28 @@ pub(super) fn build_blocks_chumsky<'src>(
         if let Some((block, next)) = try_listing_chumsky(tokens, i, source, idx) {
             blocks.push(block);
             pending_title = None;
+            pending_attrs = None;
             i = next;
             continue;
         }
         if let Some((block, next)) = try_literal_chumsky(tokens, i, source, idx) {
             blocks.push(block);
             pending_title = None;
+            pending_attrs = None;
             i = next;
             continue;
         }
         if let Some((block, next)) = try_fenced_code_chumsky(tokens, i, source, idx) {
             blocks.push(block);
             pending_title = None;
+            pending_attrs = None;
             i = next;
             continue;
         }
         if let Some((block, next)) = try_passthrough_chumsky(tokens, i, source, idx) {
             blocks.push(block);
             pending_title = None;
+            pending_attrs = None;
             i = next;
             continue;
         }
@@ -691,6 +729,7 @@ pub(super) fn build_blocks_chumsky<'src>(
         if let Some((block, next, diags)) = try_example_chumsky(tokens, i, source, idx, pending_title.take()) {
             blocks.push(block);
             diagnostics.extend(diags);
+            pending_attrs = None;
             i = next;
             continue;
         }
@@ -698,6 +737,7 @@ pub(super) fn build_blocks_chumsky<'src>(
             blocks.push(block);
             diagnostics.extend(diags);
             pending_title = None;
+            pending_attrs = None;
             i = next;
             continue;
         }
@@ -705,6 +745,7 @@ pub(super) fn build_blocks_chumsky<'src>(
             blocks.push(block);
             diagnostics.extend(diags);
             pending_title = None;
+            pending_attrs = None;
             i = next;
             continue;
         }
@@ -712,15 +753,17 @@ pub(super) fn build_blocks_chumsky<'src>(
             blocks.push(block);
             diagnostics.extend(diags);
             pending_title = None;
+            pending_attrs = None;
             i = next;
             continue;
         }
 
         // Try sections.
-        if let Some((block, next, diags)) = super::sections::try_section(tokens, i, source, idx, None) {
+        if let Some((block, next, diags)) = super::sections::try_section(tokens, i, source, idx, pending_attrs.as_ref()) {
             blocks.push(block);
             diagnostics.extend(diags);
             pending_title = None;
+            pending_attrs = None;
             i = next;
             continue;
         }
@@ -730,6 +773,7 @@ pub(super) fn build_blocks_chumsky<'src>(
             blocks.push(block);
             diagnostics.extend(diags);
             pending_title = None;
+            pending_attrs = None;
             i = next;
             continue;
         }
@@ -742,6 +786,7 @@ pub(super) fn build_blocks_chumsky<'src>(
             diagnostics.extend(diags);
         }
         pending_title = None;
+        pending_attrs = None;
         i = para_end;
     }
 

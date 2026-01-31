@@ -1,4 +1,7 @@
 //! Block/document parser: chumsky-based block structure detection.
+//!
+//! This module uses chumsky combinators for individual block parsers with
+//! procedural orchestration for the main loop that handles metadata propagation.
 
 mod attributes;
 mod breaks;
@@ -18,17 +21,6 @@ use crate::span::SourceIndex;
 use crate::token::Token;
 
 pub(super) use attributes::{HeaderResult, extract_header};
-
-use breaks::try_break;
-use comments::{is_line_comment, try_skip_block_comment};
-use delimited::{
-    try_example, try_fenced_code, try_listing, try_literal, try_open, try_passthrough, try_quote,
-    try_sidebar,
-};
-use lists::try_list;
-use metadata::{BlockAttrs, is_block_attribute_line, skip_comment_block, try_block_title};
-use paragraphs::{find_paragraph_end, make_paragraph};
-use sections::{try_discrete_heading, try_section};
 
 /// Block parse result type alias for readability.
 type ParseResult<'src> = Option<(Block<'src>, usize, Vec<ParseDiagnostic>)>;
