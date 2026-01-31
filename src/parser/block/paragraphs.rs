@@ -8,11 +8,7 @@ use super::delimited::{
 };
 use super::lists::is_list_item;
 use super::sections::is_section_heading;
-use super::{Spanned, content_span, strip_trailing_newline_index};
-use crate::asg::Block;
-use crate::diagnostic::ParseDiagnostic;
-use crate::parser::inline::run_inline_parser;
-use crate::span::SourceIndex;
+use super::{Spanned, strip_trailing_newline_index};
 use crate::token::Token;
 
 /// Find the end of a paragraph starting at `start`.
@@ -59,23 +55,4 @@ pub(super) fn find_paragraph_end(tokens: &[Spanned<'_>], start: usize) -> usize 
     }
     // Reached end of tokens — strip trailing newlines.
     strip_trailing_newline_index(tokens, start)
-}
-
-/// Build a paragraph `Block` from its content tokens.
-pub(super) fn make_paragraph<'src>(
-    tokens: &[Spanned<'src>],
-    source: &'src str,
-    idx: &SourceIndex,
-) -> (Block<'src>, Vec<ParseDiagnostic>) {
-    let trimmed = super::strip_trailing_newlines(tokens);
-    let (inlines, diagnostics) = run_inline_parser(trimmed, source, idx);
-
-    let span = content_span(trimmed);
-    let location = span.map(|s| idx.location(&s));
-
-    let mut paragraph = Block::new("paragraph");
-    paragraph.inlines = Some(inlines);
-    paragraph.location = location;
-
-    (paragraph, diagnostics)
 }

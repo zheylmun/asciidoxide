@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use super::delimited::{try_example, try_listing, try_open, try_sidebar};
 use super::paragraphs::find_paragraph_end;
 use super::{Spanned, comments::try_skip_block_comment};
-use crate::asg::{BlockMetadata, InlineNode};
+use crate::asg::InlineNode;
 use crate::diagnostic::ParseDiagnostic;
 use crate::parser::inline::run_inline_parser;
 use crate::span::SourceIndex;
@@ -28,34 +28,10 @@ pub(super) struct BlockAttrs<'src> {
     pub(super) positional: Vec<&'src str>,
 }
 
-impl<'src> BlockAttrs<'src> {
+impl BlockAttrs<'_> {
     /// Returns `true` if this attribute set indicates a comment block.
     pub(super) fn is_comment(&self) -> bool {
         self.style == Some("comment")
-    }
-
-    /// Returns `true` if this attribute set has any meaningful content.
-    #[allow(dead_code)]
-    pub(super) fn is_empty(&self) -> bool {
-        self.style.is_none()
-            && self.id.is_none()
-            && self.roles.is_empty()
-            && self.options.is_empty()
-            && self.attributes.is_empty()
-            && self.positional.is_empty()
-    }
-
-    /// Convert to ASG `BlockMetadata`, returning `None` if empty.
-    #[allow(dead_code)]
-    pub(super) fn to_metadata(&self) -> Option<BlockMetadata<'src>> {
-        if self.roles.is_empty() && self.options.is_empty() && self.attributes.is_empty() {
-            return None;
-        }
-        Some(BlockMetadata {
-            roles: self.roles.clone(),
-            options: self.options.clone(),
-            attributes: self.attributes.clone(),
-        })
     }
 }
 

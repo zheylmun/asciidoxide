@@ -6,7 +6,6 @@
 mod attributes;
 mod breaks;
 mod chumsky_parser;
-mod combinators;
 mod comments;
 mod delimited;
 mod lists;
@@ -15,219 +14,23 @@ mod paragraphs;
 mod sections;
 
 use super::{Spanned, content_span, strip_trailing_newline_index, strip_trailing_newlines};
-use crate::asg::{Block, InlineNode};
+use crate::asg::Block;
 use crate::diagnostic::ParseDiagnostic;
 use crate::span::SourceIndex;
-use crate::token::Token;
 
 pub(super) use attributes::{HeaderResult, extract_header};
 
-/// Block parse result type alias for readability.
-type ParseResult<'src> = Option<(Block<'src>, usize, Vec<ParseDiagnostic>)>;
-
-/// Try to skip pure non-content elements (newlines, comments).
-///
-/// Returns `Some(next_pos)` if something was skipped, `None` otherwise.
-/// Note: Block attributes are handled separately to track pending attrs.
-fn try_skip_comment(tokens: &[Spanned<'_>], i: usize) -> Option<usize> {
-    // Skip line comments (// ...).
-    if let Some(next) = is_line_comment(tokens, i) {
-        return Some(next);
-    }
-
-    // Skip block comments (////...////).
-    if let Some(next) = try_skip_block_comment(tokens, i) {
-        return Some(next);
-    }
-
-    None
-}
-
-/// Try to parse verbatim blocks (listing, literal, fenced code, passthrough).
-fn try_verbatim_block<'src>(
-    tokens: &[Spanned<'src>],
-    i: usize,
-    source: &'src str,
-    idx: &SourceIndex,
-) -> ParseResult<'src> {
-    if let Some((block, next)) = try_listing(tokens, i, source, idx) {
-        return Some((block, next, vec![]));
-    }
-    if let Some((block, next)) = try_literal(tokens, i, source, idx) {
-        return Some((block, next, vec![]));
-    }
-    if let Some((block, next)) = try_fenced_code(tokens, i, source, idx) {
-        return Some((block, next, vec![]));
-    }
-    if let Some((block, next)) = try_passthrough(tokens, i, source, idx) {
-        return Some((block, next, vec![]));
-    }
-    None
-}
-
-/// Try to parse compound blocks (example, quote, sidebar, open).
-fn try_compound_block<'src>(
-    tokens: &[Spanned<'src>],
-    i: usize,
-    source: &'src str,
-    idx: &SourceIndex,
-    pending_title: Option<Vec<InlineNode<'src>>>,
-) -> ParseResult<'src> {
-    if let Some((block, next, diags)) = try_example(tokens, i, source, idx, pending_title) {
-        return Some((block, next, diags));
-    }
-    if let Some((block, next, diags)) = try_quote(tokens, i, source, idx) {
-        return Some((block, next, diags));
-    }
-    if let Some((block, next, diags)) = try_sidebar(tokens, i, source, idx) {
-        return Some((block, next, diags));
-    }
-    if let Some((block, next, diags)) = try_open(tokens, i, source, idx) {
-        return Some((block, next, diags));
-    }
-    None
-}
-
-/// Try to parse structural blocks (sections, lists).
-fn try_structural_block<'src>(
-    tokens: &[Spanned<'src>],
-    i: usize,
-    source: &'src str,
-    idx: &SourceIndex,
-    pending_attrs: Option<&BlockAttrs<'src>>,
-) -> ParseResult<'src> {
-    if let Some((block, next, diags)) = try_section(tokens, i, source, idx, pending_attrs) {
-        return Some((block, next, diags));
-    }
-    if let Some((block, next, diags)) = try_list(tokens, i, source, idx) {
-        return Some((block, next, diags));
-    }
-    None
-}
-
 /// Build block-level ASG nodes from a body token stream.
 ///
-/// Scans tokens linearly, detecting delimited blocks (e.g., listing) before
-/// falling back to paragraph collection. Blocks are separated by blank lines
+/// Uses chumsky-based parsers for individual block types with procedural
+/// orchestration for the main loop. Blocks are separated by blank lines
 /// (two or more consecutive `Newline` tokens).
 pub(super) fn build_blocks<'src>(
     tokens: &[Spanned<'src>],
     source: &'src str,
     idx: &SourceIndex,
 ) -> (Vec<Block<'src>>, Vec<ParseDiagnostic>) {
-    let mut blocks = Vec::new();
-    let mut diagnostics = Vec::new();
-    let mut i = 0;
-    let mut pending_title: Option<Vec<InlineNode<'src>>> = None;
-    let mut pending_attrs: Option<BlockAttrs<'src>> = None;
-
-    while i < tokens.len() {
-        // Skip inter-block newlines.
-        while i < tokens.len() && matches!(tokens[i].0, Token::Newline) {
-            i += 1;
-        }
-        if i >= tokens.len() {
-            break;
-        }
-
-        // Skip comments.
-        if let Some(next) = try_skip_comment(tokens, i) {
-            pending_title = None;
-            pending_attrs = None;
-            i = next;
-            continue;
-        }
-
-        // Handle block attribute lines (e.g., [abstract], [source,ruby], [comment]).
-        if let Some(attr_result) = is_block_attribute_line(tokens, i, source) {
-            // If [comment], skip the following block entirely.
-            if attr_result.attrs.is_comment() {
-                pending_title = None;
-                pending_attrs = None;
-                i = skip_comment_block(tokens, attr_result.next, source, idx);
-                continue;
-            }
-            // Store attributes for the next block.
-            pending_attrs = Some(attr_result.attrs);
-            i = attr_result.next;
-            continue;
-        }
-
-        // Try block title (.Title).
-        if let Some(title_result) = try_block_title(tokens, i, source, idx) {
-            pending_title = Some(title_result.inlines);
-            diagnostics.extend(title_result.diagnostics);
-            i = title_result.next;
-            continue;
-        }
-
-        // Try break blocks (thematic or page).
-        if let Some((block, next)) = try_break(tokens, i, idx) {
-            blocks.push(block);
-            pending_title = None;
-            pending_attrs = None;
-            i = next;
-            continue;
-        }
-
-        // Try discrete heading (section with [discrete] style).
-        if let Some((block, next, diags)) =
-            try_discrete_heading(tokens, i, source, idx, pending_attrs.as_ref())
-        {
-            blocks.push(block);
-            diagnostics.extend(diags);
-            pending_title = None;
-            pending_attrs = None;
-            i = next;
-            continue;
-        }
-
-        // Try verbatim blocks.
-        if let Some((block, next, diags)) = try_verbatim_block(tokens, i, source, idx) {
-            blocks.push(block);
-            diagnostics.extend(diags);
-            pending_title = None;
-            pending_attrs = None;
-            i = next;
-            continue;
-        }
-
-        // Try compound blocks.
-        if let Some((block, next, diags)) =
-            try_compound_block(tokens, i, source, idx, pending_title.take())
-        {
-            blocks.push(block);
-            diagnostics.extend(diags);
-            pending_attrs = None;
-            i = next;
-            continue;
-        }
-
-        // Try structural blocks.
-        if let Some((block, next, diags)) =
-            try_structural_block(tokens, i, source, idx, pending_attrs.as_ref())
-        {
-            blocks.push(block);
-            diagnostics.extend(diags);
-            pending_title = None;
-            pending_attrs = None;
-            i = next;
-            continue;
-        }
-
-        // Collect paragraph tokens until a blank line or delimited block.
-        let para_end = find_paragraph_end(tokens, i);
-        if i < para_end {
-            let (block, diags) = make_paragraph(&tokens[i..para_end], source, idx);
-            blocks.push(block);
-            diagnostics.extend(diags);
-        }
-        pending_title = None;
-        pending_attrs = None;
-        i = para_end;
-    }
-
-    (blocks, diagnostics)
+    chumsky_parser::build_blocks_chumsky(tokens, source, idx)
 }
 
 // ---------------------------------------------------------------------------

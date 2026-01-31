@@ -11,156 +11,12 @@
 //! The approach uses chumsky for individual block parsers while maintaining
 //! procedural orchestration for the main block loop that handles metadata.
 
-use chumsky::{input::ValueInput, prelude::*};
-
-use super::combinators::ParseExtra;
 use super::Spanned;
 use crate::asg::{Block, InlineNode, TextNode};
 use crate::diagnostic::ParseDiagnostic;
 use crate::parser::inline::run_inline_parser;
 use crate::span::{SourceIndex, SourceSpan};
 use crate::token::Token;
-
-// ---------------------------------------------------------------------------
-// Helper Combinators
-// ---------------------------------------------------------------------------
-
-/// Parser that matches a newline or end of input.
-fn line_end<'tokens, 'src: 'tokens, I>(
-) -> impl Parser<'tokens, I, (), ParseExtra<'tokens, 'src>> + Clone + 'tokens
-where
-    I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
-{
-    choice((just(Token::Newline).ignored(), end().rewind().ignored()))
-}
-
-/// Parser that matches n+ consecutive tokens of a given type, followed by line end.
-/// Returns the count of matched tokens.
-fn delimiter_run<'tokens, 'src: 'tokens, I>(
-    token: Token<'src>,
-    min_count: usize,
-) -> impl Parser<'tokens, I, usize, ParseExtra<'tokens, 'src>> + Clone + 'tokens
-where
-    I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
-{
-    just(token)
-        .repeated()
-        .at_least(min_count)
-        .count()
-        .then_ignore(line_end())
-}
-
-/// Parser that matches exactly n consecutive tokens of a given type, followed by line end.
-fn exact_delimiter<'tokens, 'src: 'tokens, I>(
-    token: Token<'src>,
-    count: usize,
-) -> impl Parser<'tokens, I, (), ParseExtra<'tokens, 'src>> + Clone + 'tokens
-where
-    I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
-{
-    just(token)
-        .repeated()
-        .exactly(count)
-        .ignored()
-        .then_ignore(line_end())
-}
-
-// ---------------------------------------------------------------------------
-// Break Parsers
-// ---------------------------------------------------------------------------
-
-/// Thematic break parser (`'''`).
-fn thematic_break<'tokens, 'src: 'tokens, I>(
-    idx: &'tokens SourceIndex,
-) -> impl Parser<'tokens, I, Block<'src>, ParseExtra<'tokens, 'src>> + Clone + 'tokens
-where
-    I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
-{
-    just(Token::SingleQuote)
-        .then(just(Token::SingleQuote))
-        .then(just(Token::SingleQuote))
-        .then_ignore(line_end())
-        .map_with(move |_, e| {
-            let span: SourceSpan = e.span();
-            let mut block = Block::new("break");
-            block.variant = Some("thematic");
-            block.location = Some(idx.location(&span));
-            block
-        })
-}
-
-/// Page break parser (`<<<`).
-///
-/// Note: Due to chumsky's token matching semantics with borrowed strings,
-/// we use `filter` instead of `just` for the `Text("<")` token.
-fn page_break<'tokens, 'src: 'tokens, I>(
-    idx: &'tokens SourceIndex,
-) -> impl Parser<'tokens, I, Block<'src>, ParseExtra<'tokens, 'src>> + Clone + 'tokens
-where
-    I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
-{
-    just(Token::DoubleLeftAngle)
-        .then(any().filter(|t: &Token| matches!(t, Token::Text(s) if *s == "<")))
-        .then_ignore(line_end())
-        .map_with(move |_: (Token<'src>, Token<'src>), e| {
-            let span: SourceSpan = e.span();
-            let mut block = Block::new("break");
-            block.variant = Some("page");
-            block.location = Some(idx.location(&span));
-            block
-        })
-}
-
-/// Combined break parser.
-#[allow(dead_code)]
-fn break_parser<'tokens, 'src: 'tokens, I>(
-    idx: &'tokens SourceIndex,
-) -> impl Parser<'tokens, I, Block<'src>, ParseExtra<'tokens, 'src>> + Clone + 'tokens
-where
-    I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
-{
-    choice((thematic_break(idx), page_break(idx)))
-}
-
-// ---------------------------------------------------------------------------
-// Comment Parsers (return Option<Block> - None means skip)
-// ---------------------------------------------------------------------------
-
-/// Line comment parser (`// ...`).
-fn line_comment<'tokens, 'src: 'tokens, I>(
-) -> impl Parser<'tokens, I, Option<Block<'src>>, ParseExtra<'tokens, 'src>> + Clone + 'tokens
-where
-    I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
-{
-    just(Token::Slash)
-        .then(just(Token::Slash))
-        .then(
-            any()
-                .filter(|t: &Token| !matches!(t, Token::Newline))
-                .repeated(),
-        )
-        .then_ignore(line_end())
-        .to(None)
-}
-
-/// Block comment parser (`//// ... ////`).
-fn block_comment<'tokens, 'src: 'tokens, I>(
-) -> impl Parser<'tokens, I, Option<Block<'src>>, ParseExtra<'tokens, 'src>> + Clone + 'tokens
-where
-    I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
-{
-    delimiter_run(Token::Slash, 4)
-        .then(
-            any()
-                .filter(|t: &Token| !matches!(t, Token::Slash))
-                .or(just(Token::Slash).then_ignore(
-                    any().filter(|t: &Token| !matches!(t, Token::Slash)).rewind(),
-                ))
-                .repeated(),
-        )
-        .then_ignore(delimiter_run(Token::Slash, 4))
-        .to(None)
-}
 
 // ---------------------------------------------------------------------------
 // Verbatim Block Parsers
@@ -192,7 +48,9 @@ fn check_delimiter_at<'src>(
 
     // Count consecutive delimiter tokens.
     let mut j = i;
-    while j < tokens.len() && std::mem::discriminant(&tokens[j].0) == std::mem::discriminant(delimiter_token) {
+    while j < tokens.len()
+        && std::mem::discriminant(&tokens[j].0) == std::mem::discriminant(delimiter_token)
+    {
         j += 1;
     }
     let count = j - i;
@@ -239,24 +97,24 @@ fn parse_verbatim_block<'src>(
         }
 
         // Check if at start of a line (after newline or at content_start).
-        let at_line_start = j == open_info.content_start
-            || (j > 0 && matches!(tokens[j - 1].0, Token::Newline));
+        let at_line_start =
+            j == open_info.content_start || (j > 0 && matches!(tokens[j - 1].0, Token::Newline));
 
         if at_line_start
-            && let Some(close_info) = check_delimiter_at(tokens, j, delimiter_token, min_count, source)
+            && let Some(close_info) =
+                check_delimiter_at(tokens, j, delimiter_token, min_count, source)
             && close_info.count == open_info.count
         {
             // Found matching closing delimiter.
 
             // Content is between opening delimiter and closing delimiter.
             // Exclude the newline before closing delimiter.
-            let content_end = if j > open_info.content_start
-                && matches!(tokens[j - 1].0, Token::Newline)
-            {
-                j - 1
-            } else {
-                j
-            };
+            let content_end =
+                if j > open_info.content_start && matches!(tokens[j - 1].0, Token::Newline) {
+                    j - 1
+                } else {
+                    j
+                };
 
             // Build inlines from content.
             let inlines = if open_info.content_start < content_end {
@@ -360,23 +218,23 @@ fn parse_compound_block<'src>(
         }
 
         // Check if at start of a line.
-        let at_line_start = j == open_info.content_start
-            || (j > 0 && matches!(tokens[j - 1].0, Token::Newline));
+        let at_line_start =
+            j == open_info.content_start || (j > 0 && matches!(tokens[j - 1].0, Token::Newline));
 
         if at_line_start
-            && let Some(close_info) = check_delimiter_at(tokens, j, delimiter_token, min_count, source)
+            && let Some(close_info) =
+                check_delimiter_at(tokens, j, delimiter_token, min_count, source)
             && close_info.count == open_info.count
         {
             // Found matching closing delimiter.
 
             // Content is between opening delimiter and closing delimiter.
-            let content_end = if j > open_info.content_start
-                && matches!(tokens[j - 1].0, Token::Newline)
-            {
-                j - 1
-            } else {
-                j
-            };
+            let content_end =
+                if j > open_info.content_start && matches!(tokens[j - 1].0, Token::Newline) {
+                    j - 1
+                } else {
+                    j
+                };
 
             // Recursively parse content as blocks.
             let content_tokens = &tokens[open_info.content_start..content_end];
@@ -472,7 +330,8 @@ pub(super) fn try_open_chumsky<'src>(
         }
 
         // Check if at start of a line.
-        let at_line_start = k == content_start || (k > 0 && matches!(tokens[k - 1].0, Token::Newline));
+        let at_line_start =
+            k == content_start || (k > 0 && matches!(tokens[k - 1].0, Token::Newline));
 
         if at_line_start
             && k + 1 < tokens.len()
@@ -485,7 +344,8 @@ pub(super) fn try_open_chumsky<'src>(
             if after_delim >= tokens.len() || matches!(tokens[after_delim].0, Token::Newline) {
                 // Found matching closing delimiter.
 
-                let content_end = if k > content_start && matches!(tokens[k - 1].0, Token::Newline) {
+                let content_end = if k > content_start && matches!(tokens[k - 1].0, Token::Newline)
+                {
                     k - 1
                 } else {
                     k
@@ -726,7 +586,9 @@ pub(super) fn build_blocks_chumsky<'src>(
         }
 
         // Try compound blocks.
-        if let Some((block, next, diags)) = try_example_chumsky(tokens, i, source, idx, pending_title.take()) {
+        if let Some((block, next, diags)) =
+            try_example_chumsky(tokens, i, source, idx, pending_title.take())
+        {
             blocks.push(block);
             diagnostics.extend(diags);
             pending_attrs = None;
@@ -759,7 +621,9 @@ pub(super) fn build_blocks_chumsky<'src>(
         }
 
         // Try sections.
-        if let Some((block, next, diags)) = super::sections::try_section(tokens, i, source, idx, pending_attrs.as_ref()) {
+        if let Some((block, next, diags)) =
+            super::sections::try_section(tokens, i, source, idx, pending_attrs.as_ref())
+        {
             blocks.push(block);
             diagnostics.extend(diags);
             pending_title = None;
@@ -800,48 +664,6 @@ pub(super) fn build_blocks_chumsky<'src>(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_thematic_break_parser() {
-        use crate::lexer::lex;
-
-        let source = "'''\n";
-        let tokens = lex(source);
-        let idx = SourceIndex::new(source);
-
-        let eoi = SourceSpan {
-            start: source.len(),
-            end: source.len(),
-        };
-        let input = tokens.as_slice().split_token_span(eoi);
-
-        let parser = thematic_break(&idx);
-        let result = parser.parse(input);
-
-        assert!(result.has_output());
-        let block = result.into_output().unwrap();
-        assert_eq!(block.name, "break");
-        assert_eq!(block.variant, Some("thematic"));
-    }
-
-    #[test]
-    fn test_line_comment_parser() {
-        use crate::lexer::lex;
-
-        let source = "// comment\n";
-        let tokens = lex(source);
-
-        let eoi = SourceSpan {
-            start: source.len(),
-            end: source.len(),
-        };
-        let input = tokens.as_slice().split_token_span(eoi);
-
-        let result = line_comment().parse(input);
-
-        assert!(result.has_output());
-        assert!(result.into_output().unwrap().is_none()); // Comments return None
-    }
 
     #[test]
     fn test_listing_block() {
