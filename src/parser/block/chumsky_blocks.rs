@@ -261,43 +261,6 @@ where
 // Verbatim Block Parsers
 // ---------------------------------------------------------------------------
 
-/// Check if tokens at current position form a delimiter line.
-/// Returns (span, count) if valid, None otherwise.
-fn check_delimiter(
-    tokens: &[(Token<'_>, SourceSpan)],
-    pos: usize,
-    delimiter_token: &Token<'_>,
-    min_count: usize,
-) -> Option<(SourceSpan, usize)> {
-    if pos >= tokens.len() {
-        return None;
-    }
-
-    // Count consecutive delimiter tokens
-    let mut end = pos;
-    while end < tokens.len()
-        && std::mem::discriminant(&tokens[end].0) == std::mem::discriminant(delimiter_token)
-    {
-        end += 1;
-    }
-    let count = end - pos;
-
-    if count < min_count {
-        return None;
-    }
-
-    // Must be followed by Newline or EOF
-    if end < tokens.len() && !matches!(tokens[end].0, Token::Newline) {
-        return None;
-    }
-
-    let span = SourceSpan {
-        start: tokens[pos].1.start,
-        end: tokens[end - 1].1.end,
-    };
-
-    Some((span, count))
-}
 
 /// Parse a verbatim block with the given delimiter.
 ///
@@ -774,6 +737,396 @@ where
 }
 
 // ---------------------------------------------------------------------------
+// Section Parsers
+// ---------------------------------------------------------------------------
+
+/// Parse a section heading (`== Title`, `=== Title`, etc.).
+///
+/// Sections have level = (number of `=` signs) - 1, so:
+/// - `== Title` is level 1
+/// - `=== Title` is level 2
+/// - etc.
+///
+/// In phase 2, we just capture the title span. The section body (all content
+/// until a same-or-higher-level heading) is handled separately.
+fn section_heading<'tokens, 'src: 'tokens, I>(
+    source: &'src str,
+    idx: &'tokens SourceIndex,
+) -> impl Parser<'tokens, I, RawBlock<'src>, BlockExtra<'tokens, 'src>> + Clone
+where
+    I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
+{
+    custom(move |inp| {
+        let before = inp.save();
+        let start_cursor = inp.cursor();
+
+        // Count leading `=` tokens (need at least 2 for a section)
+        let mut eq_count = 0;
+        while matches!(inp.peek(), Some(Token::Eq)) {
+            inp.skip();
+            eq_count += 1;
+        }
+
+        if eq_count < 2 {
+            inp.rewind(before);
+            return Err(Rich::custom(
+                inp.span_since(&start_cursor),
+                "need at least 2 equals signs for section",
+            ));
+        }
+
+        // Must be followed by whitespace
+        if !matches!(inp.peek(), Some(Token::Whitespace)) {
+            inp.rewind(before);
+            return Err(Rich::custom(
+                inp.span_since(&start_cursor),
+                "expected whitespace after section marker",
+            ));
+        }
+        inp.skip(); // consume whitespace
+
+        // Capture title content (everything until newline)
+        let title_cursor = inp.cursor();
+        while inp.peek().is_some() && !matches!(inp.peek(), Some(Token::Newline)) {
+            inp.skip();
+        }
+        let title_span: SourceSpan = inp.span_since(&title_cursor);
+
+        // Title must have content
+        if title_span.start >= title_span.end {
+            inp.rewind(before);
+            return Err(Rich::custom(
+                inp.span_since(&start_cursor),
+                "section title cannot be empty",
+            ));
+        }
+
+        // Consume trailing newline if present
+        if matches!(inp.peek(), Some(Token::Newline)) {
+            inp.skip();
+        }
+
+        let block_span: SourceSpan = inp.span_since(&start_cursor);
+        let level = eq_count - 1;
+
+        let mut block = RawBlock::new("section");
+        block.level = Some(level);
+        block.title_span = Some(title_span);
+        block.location = Some(idx.location(&block_span));
+
+        // Store the section marker for later (may be useful)
+        let marker_end = block_span.start + eq_count;
+        block.marker = Some(&source[block_span.start..marker_end]);
+
+        Ok(block)
+    })
+}
+
+// ---------------------------------------------------------------------------
+// List Parsers
+// ---------------------------------------------------------------------------
+
+/// Count consecutive tokens of a specific type at current position.
+/// Does NOT consume the tokens.
+fn peek_token_count<'tokens, 'src: 'tokens, I, E>(
+    inp: &mut chumsky::input::InputRef<'tokens, '_, I, E>,
+    token: &Token<'src>,
+) -> usize
+where
+    I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
+    E: chumsky::extra::ParserExtra<'tokens, I>,
+{
+    let before = inp.save();
+    let discriminant = std::mem::discriminant(token);
+    let mut count = 0;
+    while inp
+        .peek()
+        .is_some_and(|t| std::mem::discriminant(&t) == discriminant)
+    {
+        inp.skip();
+        count += 1;
+    }
+    inp.rewind(before);
+    count
+}
+
+/// Parse a list item with the given marker token and expected level.
+/// Returns `(RawBlock, was_parsed)`.
+fn parse_list_item<'tokens, 'src: 'tokens, I>(
+    inp: &mut chumsky::input::InputRef<'tokens, '_, I, BlockExtra<'tokens, 'src>>,
+    marker_token: &Token<'src>,
+    expected_level: usize,
+    source: &'src str,
+    idx: &SourceIndex,
+) -> Option<RawBlock<'src>>
+where
+    I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
+{
+    let before = inp.save();
+    let start_cursor = inp.cursor();
+
+    // Skip leading whitespace (for continuation items)
+    while matches!(inp.peek(), Some(Token::Whitespace)) {
+        inp.skip();
+    }
+
+    let marker_cursor = inp.cursor();
+    let discriminant = std::mem::discriminant(marker_token);
+
+    // Count and consume marker tokens
+    let mut marker_count = 0;
+    while inp
+        .peek()
+        .is_some_and(|t| std::mem::discriminant(&t) == discriminant)
+    {
+        inp.skip();
+        marker_count += 1;
+    }
+
+    // Check we have the expected level
+    if marker_count != expected_level {
+        inp.rewind(before);
+        return None;
+    }
+
+    // Must be followed by whitespace
+    if !matches!(inp.peek(), Some(Token::Whitespace)) {
+        inp.rewind(before);
+        return None;
+    }
+    inp.skip(); // consume whitespace
+
+    let marker_span: SourceSpan = inp.span_since(&marker_cursor);
+    let marker = &source[marker_span.start..marker_span.end];
+
+    // Capture principal content (everything until newline)
+    let content_cursor = inp.cursor();
+    while inp.peek().is_some() && !matches!(inp.peek(), Some(Token::Newline)) {
+        inp.skip();
+    }
+    let content_span: SourceSpan = inp.span_since(&content_cursor);
+
+    // Consume trailing newline if present
+    if matches!(inp.peek(), Some(Token::Newline)) {
+        inp.skip();
+    }
+
+    let item_span: SourceSpan = inp.span_since(&start_cursor);
+
+    let mut item = RawBlock::new("listItem");
+    item.marker = Some(marker.trim_end());
+    if content_span.start < content_span.end {
+        item.principal_span = Some(content_span);
+    }
+    item.location = Some(idx.location(&item_span));
+
+    Some(item)
+}
+
+/// Parse a list (unordered or ordered).
+///
+/// Unordered lists use `*` markers, ordered use `.` markers.
+/// Nesting is determined by marker count (`**` is deeper than `*`).
+fn list<'tokens, 'src: 'tokens, I>(
+    marker_token: Token<'src>,
+    variant: &'static str,
+    source: &'src str,
+    idx: &'tokens SourceIndex,
+) -> impl Parser<'tokens, I, RawBlock<'src>, BlockExtra<'tokens, 'src>> + Clone
+where
+    I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
+{
+    custom(move |inp| {
+        let before = inp.save();
+        let start_cursor = inp.cursor();
+
+        // Skip leading whitespace
+        while matches!(inp.peek(), Some(Token::Whitespace)) {
+            inp.skip();
+        }
+
+        // Determine list level from first item's marker count
+        let marker_count = peek_token_count(inp, &marker_token);
+        if marker_count == 0 {
+            inp.rewind(before);
+            return Err(Rich::custom(
+                inp.span_since(&start_cursor),
+                "expected list marker",
+            ));
+        }
+
+        // Check it's followed by whitespace (to distinguish from other uses)
+        let before_peek = inp.save();
+        for _ in 0..marker_count {
+            inp.skip();
+        }
+        let is_list = matches!(inp.peek(), Some(Token::Whitespace));
+        inp.rewind(before_peek);
+
+        if !is_list {
+            inp.rewind(before);
+            return Err(Rich::custom(
+                inp.span_since(&start_cursor),
+                "not a list item",
+            ));
+        }
+
+        let list_level = marker_count;
+        let mut items: Vec<RawBlock<'src>> = Vec::new();
+
+        // Parse items at this level
+        loop {
+            // Check what's next
+            // Skip whitespace at start of line
+            let line_before = inp.save();
+            while matches!(inp.peek(), Some(Token::Whitespace)) {
+                inp.skip();
+            }
+
+            // Check for list marker
+            let current_count = peek_token_count(inp, &marker_token);
+
+            // If no markers or different level, we're done with this list
+            if current_count == 0 {
+                inp.rewind(line_before);
+                break;
+            }
+
+            // Check if followed by whitespace (valid list item)
+            let before_check = inp.save();
+            for _ in 0..current_count {
+                inp.skip();
+            }
+            let is_valid = matches!(inp.peek(), Some(Token::Whitespace));
+            inp.rewind(before_check);
+
+            if !is_valid {
+                inp.rewind(line_before);
+                break;
+            }
+
+            if current_count < list_level {
+                // Returning to parent level
+                inp.rewind(line_before);
+                break;
+            }
+
+            if current_count > list_level {
+                // Nested list - need to parse it and attach to last item
+                inp.rewind(line_before);
+
+                // Parse nested list recursively
+                let nested_start = inp.cursor();
+                let nested_level = current_count;
+                let mut nested_items: Vec<RawBlock<'src>> = Vec::new();
+
+                // Parse nested items
+                loop {
+                    while matches!(inp.peek(), Some(Token::Whitespace)) {
+                        inp.skip();
+                    }
+
+                    let nested_count = peek_token_count(inp, &marker_token);
+                    if nested_count != nested_level {
+                        break;
+                    }
+
+                    // Check followed by whitespace
+                    let before_nested = inp.save();
+                    for _ in 0..nested_count {
+                        inp.skip();
+                    }
+                    if !matches!(inp.peek(), Some(Token::Whitespace)) {
+                        inp.rewind(before_nested);
+                        break;
+                    }
+                    inp.rewind(before_nested);
+
+                    if let Some(item) = parse_list_item(inp, &marker_token, nested_level, source, idx)
+                    {
+                        nested_items.push(item);
+                    } else {
+                        break;
+                    }
+                }
+
+                if !nested_items.is_empty() {
+                    let nested_span: SourceSpan = inp.span_since(&nested_start);
+                    let first_item_marker = nested_items[0].marker.unwrap_or("");
+
+                    let mut nested_list = RawBlock::new("list");
+                    nested_list.variant = Some(variant);
+                    nested_list.marker = Some(first_item_marker);
+                    nested_list.items = Some(nested_items);
+                    nested_list.location = Some(idx.location(&nested_span));
+
+                    // Attach to last item
+                    if let Some(last_item) = items.last_mut() {
+                        if last_item.blocks.is_none() {
+                            last_item.blocks = Some(Vec::new());
+                        }
+                        last_item.blocks.as_mut().unwrap().push(nested_list);
+                    }
+                }
+
+                continue;
+            }
+
+            // Same level - parse item
+            inp.rewind(line_before);
+            if let Some(item) = parse_list_item(inp, &marker_token, list_level, source, idx) {
+                items.push(item);
+            } else {
+                break;
+            }
+        }
+
+        if items.is_empty() {
+            inp.rewind(before);
+            return Err(Rich::custom(
+                inp.span_since(&start_cursor),
+                "no list items found",
+            ));
+        }
+
+        let list_span: SourceSpan = inp.span_since(&start_cursor);
+
+        // Get marker from first item
+        let first_marker = items[0].marker.unwrap_or("");
+
+        let mut list_block = RawBlock::new("list");
+        list_block.variant = Some(variant);
+        list_block.marker = Some(first_marker);
+        list_block.items = Some(items);
+        list_block.location = Some(idx.location(&list_span));
+
+        Ok(list_block)
+    })
+}
+
+/// Parse an unordered list (`*`, `**`, etc.).
+fn unordered_list<'tokens, 'src: 'tokens, I>(
+    source: &'src str,
+    idx: &'tokens SourceIndex,
+) -> impl Parser<'tokens, I, RawBlock<'src>, BlockExtra<'tokens, 'src>> + Clone
+where
+    I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
+{
+    list(Token::Star, "unordered", source, idx)
+}
+
+/// Parse an ordered list (`.`, `..`, etc.).
+fn ordered_list<'tokens, 'src: 'tokens, I>(
+    source: &'src str,
+    idx: &'tokens SourceIndex,
+) -> impl Parser<'tokens, I, RawBlock<'src>, BlockExtra<'tokens, 'src>> + Clone
+where
+    I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
+{
+    list(Token::Dot, "ordered", source, idx)
+}
+
+// ---------------------------------------------------------------------------
 // Paragraph Parser
 // ---------------------------------------------------------------------------
 
@@ -841,6 +1194,11 @@ where
         // Breaks
         thematic_break(idx).map(ParseItem::Block),
         page_break(idx).map(ParseItem::Block),
+        // Section headings
+        section_heading(source, idx).map(ParseItem::Block),
+        // Lists (must come before paragraph)
+        unordered_list(source, idx).map(ParseItem::Block),
+        ordered_list(source, idx).map(ParseItem::Block),
         // Verbatim blocks (must come before compound to avoid conflicts)
         listing_block(source, idx).map(ParseItem::Block),
         literal_block(source, idx).map(ParseItem::Block),
@@ -1121,5 +1479,101 @@ mod tests {
         let span = blocks[0].content_span.expect("should have content span");
         // Content includes the nested sidebar block
         assert_eq!(&source[span.start..span.end], "****\nnested\n****");
+    }
+
+    #[test]
+    fn test_section_heading() {
+        let source = "== Section Title\n";
+        let tokens = lex(source);
+        let idx = SourceIndex::new(source);
+
+        let (blocks, diags) = parse_raw_blocks(&tokens, source, &idx);
+
+        assert!(diags.is_empty(), "diagnostics: {diags:?}");
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].name, "section");
+        assert_eq!(blocks[0].level, Some(1));
+        let title_span = blocks[0].title_span.expect("should have title span");
+        assert_eq!(&source[title_span.start..title_span.end], "Section Title");
+    }
+
+    #[test]
+    fn test_section_level_2() {
+        let source = "=== Subsection\n";
+        let tokens = lex(source);
+        let idx = SourceIndex::new(source);
+
+        let (blocks, diags) = parse_raw_blocks(&tokens, source, &idx);
+
+        assert!(diags.is_empty(), "diagnostics: {diags:?}");
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].name, "section");
+        assert_eq!(blocks[0].level, Some(2));
+    }
+
+    #[test]
+    fn test_unordered_list_simple() {
+        let source = "* item one\n* item two\n";
+        let tokens = lex(source);
+        let idx = SourceIndex::new(source);
+
+        let (blocks, diags) = parse_raw_blocks(&tokens, source, &idx);
+
+        assert!(diags.is_empty(), "diagnostics: {diags:?}");
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].name, "list");
+        assert_eq!(blocks[0].variant, Some("unordered"));
+
+        let items = blocks[0].items.as_ref().expect("should have items");
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].name, "listItem");
+        assert_eq!(items[0].marker, Some("*"));
+
+        let span = items[0].principal_span.expect("should have principal span");
+        assert_eq!(&source[span.start..span.end], "item one");
+    }
+
+    #[test]
+    fn test_ordered_list_simple() {
+        let source = ". first\n. second\n";
+        let tokens = lex(source);
+        let idx = SourceIndex::new(source);
+
+        let (blocks, diags) = parse_raw_blocks(&tokens, source, &idx);
+
+        assert!(diags.is_empty(), "diagnostics: {diags:?}");
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].name, "list");
+        assert_eq!(blocks[0].variant, Some("ordered"));
+
+        let items = blocks[0].items.as_ref().expect("should have items");
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].marker, Some("."));
+    }
+
+    #[test]
+    fn test_nested_unordered_list() {
+        let source = "* outer\n** nested\n* back to outer\n";
+        let tokens = lex(source);
+        let idx = SourceIndex::new(source);
+
+        let (blocks, diags) = parse_raw_blocks(&tokens, source, &idx);
+
+        assert!(diags.is_empty(), "diagnostics: {diags:?}");
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].name, "list");
+
+        let items = blocks[0].items.as_ref().expect("should have items");
+        assert_eq!(items.len(), 2);
+
+        // First item should have nested list in its blocks
+        let nested = items[0].blocks.as_ref().expect("first item should have blocks");
+        assert_eq!(nested.len(), 1);
+        assert_eq!(nested[0].name, "list");
+        assert_eq!(nested[0].variant, Some("unordered"));
+
+        let nested_items = nested[0].items.as_ref().expect("nested list should have items");
+        assert_eq!(nested_items.len(), 1);
+        assert_eq!(nested_items[0].marker, Some("**"));
     }
 }
