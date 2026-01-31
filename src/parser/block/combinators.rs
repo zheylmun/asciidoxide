@@ -116,10 +116,10 @@ where
             }
 
             // Also strip trailing newline before delimiter if present
-            if content_end > 0 {
-                if let Some((Token::Newline, _)) = tokens.get(content_end - 1) {
-                    content_end -= 1;
-                }
+            if content_end > 0
+                && let Some((Token::Newline, _)) = tokens.get(content_end - 1)
+            {
+                content_end -= 1;
             }
 
             Ok((tokens[..content_end].to_vec(), close_count))
