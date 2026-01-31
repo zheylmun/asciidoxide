@@ -5,12 +5,14 @@
 
 mod attributes;
 mod breaks;
+mod chumsky_blocks;
 mod chumsky_parser;
 mod comments;
 mod delimited;
 mod lists;
 mod metadata;
 mod paragraphs;
+mod raw_block;
 mod sections;
 
 use super::{Spanned, content_span, strip_trailing_newline_index, strip_trailing_newlines};
