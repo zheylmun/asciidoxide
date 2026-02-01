@@ -1282,6 +1282,7 @@ fn merge_metadata<'src>(
 // ---------------------------------------------------------------------------
 
 use super::Spanned;
+use crate::asg::Block;
 use crate::diagnostic::ParseDiagnostic;
 
 /// Parse tokens into raw blocks (phase 2).
@@ -1316,6 +1317,29 @@ pub(super) fn parse_raw_blocks<'src>(
         .collect();
 
     (output.unwrap_or_default(), diagnostics)
+}
+
+// ---------------------------------------------------------------------------
+// Combined Entry Point (Phase 2 + Phase 3)
+// ---------------------------------------------------------------------------
+
+/// Build blocks from a token stream using pure chumsky parsing.
+///
+/// This combines Phase 2 (block boundary identification) and Phase 3
+/// (RawBlock → Block transformation with inline parsing).
+pub(super) fn build_blocks_pure_chumsky<'src>(
+    tokens: &[Spanned<'src>],
+    source: &'src str,
+    idx: &SourceIndex,
+) -> (Vec<Block<'src>>, Vec<ParseDiagnostic>) {
+    // Phase 2: Parse into RawBlocks
+    let (raw_blocks, mut diagnostics) = parse_raw_blocks(tokens, source, idx);
+
+    // Phase 3: Transform to Blocks with inline parsing
+    let (blocks, transform_diags) = super::transform::transform_raw_blocks(raw_blocks, source, idx);
+    diagnostics.extend(transform_diags);
+
+    (blocks, diagnostics)
 }
 
 // ---------------------------------------------------------------------------
@@ -1575,5 +1599,63 @@ mod tests {
         let nested_items = nested[0].items.as_ref().expect("nested list should have items");
         assert_eq!(nested_items.len(), 1);
         assert_eq!(nested_items[0].marker, Some("**"));
+    }
+
+    // Tests for combined entry point (Phase 2 + Phase 3)
+
+    #[test]
+    fn test_combined_paragraph_with_formatting() {
+        let source = "hello *bold* world\n";
+        let tokens = lex(source);
+        let idx = SourceIndex::new(source);
+
+        let (blocks, diags) = build_blocks_pure_chumsky(&tokens, source, &idx);
+
+        assert!(diags.is_empty(), "diagnostics: {diags:?}");
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].name, "paragraph");
+        assert!(blocks[0].inlines.is_some());
+        // Should have parsed inlines with strong formatting
+        let inlines = blocks[0].inlines.as_ref().unwrap();
+        assert!(inlines.len() >= 2); // At least text + strong
+    }
+
+    #[test]
+    fn test_combined_nested_compound() {
+        let source = "====\ninner *bold* paragraph\n====\n";
+        let tokens = lex(source);
+        let idx = SourceIndex::new(source);
+
+        let (blocks, diags) = build_blocks_pure_chumsky(&tokens, source, &idx);
+
+        assert!(diags.is_empty(), "diagnostics: {diags:?}");
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].name, "example");
+
+        // Should have child blocks with parsed inlines
+        let child_blocks = blocks[0].blocks.as_ref().expect("should have child blocks");
+        assert_eq!(child_blocks.len(), 1);
+        assert_eq!(child_blocks[0].name, "paragraph");
+        assert!(child_blocks[0].inlines.is_some());
+    }
+
+    #[test]
+    fn test_combined_list_with_formatting() {
+        let source = "* item *one*\n* item two\n";
+        let tokens = lex(source);
+        let idx = SourceIndex::new(source);
+
+        let (blocks, diags) = build_blocks_pure_chumsky(&tokens, source, &idx);
+
+        assert!(diags.is_empty(), "diagnostics: {diags:?}");
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].name, "list");
+
+        let items = blocks[0].items.as_ref().expect("should have items");
+        assert_eq!(items.len(), 2);
+
+        // First item should have parsed principal with formatting
+        let principal = items[0].principal.as_ref().expect("should have principal");
+        assert!(!principal.is_empty());
     }
 }

@@ -14,6 +14,7 @@ mod metadata;
 mod paragraphs;
 mod raw_block;
 mod sections;
+mod transform;
 
 use super::{Spanned, content_span, strip_trailing_newline_index, strip_trailing_newlines};
 use crate::asg::Block;
