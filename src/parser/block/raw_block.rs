@@ -49,11 +49,14 @@ pub(super) struct RawBlock<'src> {
     /// List item marker.
     pub(super) marker: Option<&'src str>,
 
+    /// For sections: location of just the heading line (for discrete heading conversion).
+    pub(super) heading_line_location: Option<Location>,
+
     /// Source location.
     pub(super) location: Option<Location>,
 }
 
-impl<'src> RawBlock<'src> {
+impl RawBlock<'_> {
     /// Create a new raw block with the given name.
     pub(super) fn new(name: &'static str) -> Self {
         Self {
@@ -73,6 +76,7 @@ impl<'src> RawBlock<'src> {
             level: None,
             variant: None,
             marker: None,
+            heading_line_location: None,
             location: None,
         }
     }

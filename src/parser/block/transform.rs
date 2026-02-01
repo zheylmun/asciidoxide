@@ -1,25 +1,135 @@
-//! Phase 3: Transform RawBlock to Block.
+//! Phase 3: Transform `RawBlock` to Block.
 //!
-//! This module walks the RawBlock tree from phase 2 and:
+//! This module walks the `RawBlock` tree from phase 2 and:
 //! 1. Parses inline content for basic-content-model blocks
 //! 2. Recursively parses compound block content
 //! 3. Parses title spans as inlines
 
 use super::raw_block::RawBlock;
-use crate::asg::{Block, BlockMetadata, InlineNode, TextNode};
+use crate::asg::{Block, BlockMetadata, InlineNode, Location, Position, TextNode};
 use crate::diagnostic::ParseDiagnostic;
 use crate::lexer::lex;
 use crate::parser::inline::run_inline_parser;
-use crate::span::SourceIndex;
+use crate::span::{SourceIndex, SourceSpan};
 
-/// Transform a RawBlock into a Block by parsing inline content.
+/// Offset a location by a base position.
+///
+/// When we parse content from a substring, the resulting locations are relative
+/// to the substring's start (line 1, col 1). This function adjusts them to be
+/// relative to the original source using the byte offset of the substring.
+fn offset_location(loc: Option<Location>, base: Position) -> Option<Location> {
+    loc.map(|[start, end]| {
+        [
+            Position {
+                line: start.line + base.line - 1,
+                col: if start.line == 1 {
+                    start.col + base.col - 1
+                } else {
+                    start.col
+                },
+            },
+            Position {
+                line: end.line + base.line - 1,
+                col: if end.line == 1 {
+                    end.col + base.col - 1
+                } else {
+                    end.col
+                },
+            },
+        ]
+    })
+}
+
+/// Offset all locations in a block tree by a base position.
+fn offset_block_locations(block: &mut Block<'_>, base: Position) {
+    block.location = offset_location(block.location, base);
+
+    // Offset inlines
+    if let Some(ref mut inlines) = block.inlines {
+        for inline in inlines.iter_mut() {
+            offset_inline_location(inline, base);
+        }
+    }
+
+    // Offset title
+    if let Some(ref mut title) = block.title {
+        for inline in title.iter_mut() {
+            offset_inline_location(inline, base);
+        }
+    }
+
+    // Offset principal
+    if let Some(ref mut principal) = block.principal {
+        for inline in principal.iter_mut() {
+            offset_inline_location(inline, base);
+        }
+    }
+
+    // Offset child blocks
+    if let Some(ref mut blocks) = block.blocks {
+        for child in blocks.iter_mut() {
+            offset_block_locations(child, base);
+        }
+    }
+
+    // Offset items
+    if let Some(ref mut items) = block.items {
+        for item in items.iter_mut() {
+            offset_block_locations(item, base);
+        }
+    }
+}
+
+/// Offset a location in an inline node.
+fn offset_inline_location(inline: &mut InlineNode<'_>, base: Position) {
+    match inline {
+        InlineNode::Text(text) => {
+            text.location = offset_location(text.location, base);
+        }
+        InlineNode::Span(span) => {
+            span.location = offset_location(span.location, base);
+            for child in &mut span.inlines {
+                offset_inline_location(child, base);
+            }
+        }
+        InlineNode::Ref(r) => {
+            r.location = offset_location(r.location, base);
+            for child in &mut r.inlines {
+                offset_inline_location(child, base);
+            }
+        }
+        InlineNode::Raw(raw) => {
+            raw.location = offset_location(raw.location, base);
+        }
+    }
+}
+
+/// Get the starting position for a byte offset in the original source.
+fn get_base_position(_source: &str, idx: &SourceIndex, byte_offset: usize) -> Position {
+    let loc = idx.location(&SourceSpan {
+        start: byte_offset,
+        end: byte_offset,
+    });
+    loc[0]
+}
+
+/// Transform a `RawBlock` into one or more Blocks by parsing inline content.
 ///
 /// This is phase 3 of the parsing pipeline.
+/// The `source` is the original full source, and `idx` is its `SourceIndex`.
+///
+/// Returns a vector because discrete sections expand into a heading plus sibling blocks.
+#[allow(clippy::too_many_lines)]
 pub(super) fn transform_raw_block<'src>(
     raw: RawBlock<'src>,
     source: &'src str,
     idx: &SourceIndex,
-) -> (Block<'src>, Vec<ParseDiagnostic>) {
+) -> (Vec<Block<'src>>, Vec<ParseDiagnostic>) {
+    // Handle discrete sections specially - they expand into heading + sibling blocks
+    if raw.name == "section" && raw.style == Some("discrete") {
+        return transform_discrete_section(raw, source, idx);
+    }
+
     let mut diagnostics = Vec::new();
 
     let mut block = Block::new(raw.name);
@@ -41,41 +151,50 @@ pub(super) fn transform_raw_block<'src>(
         });
     }
 
-    // Parse title span as inlines
+    // Parse title span as inlines (with location adjustment)
     if let Some(title_span) = raw.title_span {
         let title_content = &source[title_span.start..title_span.end];
         let title_tokens = lex(title_content);
-        // Create a new SourceIndex for the title substring
         let title_idx = SourceIndex::new(title_content);
-        let (title_inlines, title_diags) = run_inline_parser(&title_tokens, title_content, &title_idx);
+        let (mut title_inlines, title_diags) =
+            run_inline_parser(&title_tokens, title_content, &title_idx);
         diagnostics.extend(title_diags);
+
+        // Adjust locations to be relative to original source
+        let base = get_base_position(source, idx, title_span.start);
+        for inline in &mut title_inlines {
+            offset_inline_location(inline, base);
+        }
         block.title = Some(title_inlines);
     }
 
-    // Parse reftext span as inlines
+    // Parse reftext span as inlines (with location adjustment)
     if let Some(reftext_span) = raw.reftext_span {
         let reftext_content = &source[reftext_span.start..reftext_span.end];
         let reftext_tokens = lex(reftext_content);
         let reftext_idx = SourceIndex::new(reftext_content);
-        let (reftext_inlines, reftext_diags) =
+        let (mut reftext_inlines, reftext_diags) =
             run_inline_parser(&reftext_tokens, reftext_content, &reftext_idx);
         diagnostics.extend(reftext_diags);
+
+        let base = get_base_position(source, idx, reftext_span.start);
+        for inline in &mut reftext_inlines {
+            offset_inline_location(inline, base);
+        }
         block.reftext = Some(reftext_inlines);
     }
 
     // Handle content based on block type
     match raw.name {
-        // Verbatim blocks: content stays as raw text
+        // Verbatim blocks: content stays as raw text (with proper location)
         "listing" | "literal" | "pass" => {
             if let Some(content_span) = raw.content_span {
                 let content = &source[content_span.start..content_span.end];
-                let content_idx = SourceIndex::new(content);
+                // Use the original idx to get the correct location
+                let location = idx.location(&content_span);
                 block.inlines = Some(vec![InlineNode::Text(TextNode {
                     value: content,
-                    location: Some(content_idx.location(&crate::span::SourceSpan {
-                        start: 0,
-                        end: content.len(),
-                    })),
+                    location: Some(location),
                 })]);
             } else {
                 block.inlines = Some(vec![]);
@@ -88,9 +207,15 @@ pub(super) fn transform_raw_block<'src>(
                 let content = &source[content_span.start..content_span.end];
                 let content_tokens = lex(content);
                 let content_idx = SourceIndex::new(content);
-                let (inlines, content_diags) =
+                let (mut inlines, content_diags) =
                     run_inline_parser(&content_tokens, content, &content_idx);
                 diagnostics.extend(content_diags);
+
+                // Adjust locations
+                let base = get_base_position(source, idx, content_span.start);
+                for inline in &mut inlines {
+                    offset_inline_location(inline, base);
+                }
                 block.inlines = Some(inlines);
             } else {
                 block.inlines = Some(vec![]);
@@ -108,11 +233,17 @@ pub(super) fn transform_raw_block<'src>(
                 diagnostics.extend(block_diags);
 
                 // Recursively transform child blocks
+                let base = get_base_position(source, idx, content_span.start);
                 let mut child_blocks = Vec::new();
                 for raw_child in raw_blocks {
-                    let (child, child_diags) = transform_raw_block(raw_child, content, &content_idx);
+                    let (mut children, child_diags) =
+                        transform_raw_block(raw_child, content, &content_idx);
                     diagnostics.extend(child_diags);
-                    child_blocks.push(child);
+                    // Adjust all locations in the child block tree
+                    for child in &mut children {
+                        offset_block_locations(child, base);
+                    }
+                    child_blocks.extend(children);
                 }
                 block.blocks = Some(child_blocks);
             } else {
@@ -120,23 +251,43 @@ pub(super) fn transform_raw_block<'src>(
             }
         }
 
-        // Sections: title is already handled above, body is in blocks field
-        // Note: In phase 2, sections don't capture body content yet
-        // For now, sections have no body blocks (that would need section nesting logic)
+        // Sections: title is already handled above, body content is recursively parsed
         "section" => {
-            // Sections currently don't have body content from phase 2
-            // This would require more complex section nesting logic
-            block.blocks = Some(vec![]);
+            if let Some(content_span) = raw.content_span {
+                let content = &source[content_span.start..content_span.end];
+                let content_tokens = lex(content);
+                let content_idx = SourceIndex::new(content);
+                let (raw_blocks, block_diags) =
+                    super::chumsky_blocks::parse_raw_blocks(&content_tokens, content, &content_idx);
+                diagnostics.extend(block_diags);
+
+                // Recursively transform child blocks
+                let base = get_base_position(source, idx, content_span.start);
+                let mut child_blocks = Vec::new();
+                for raw_child in raw_blocks {
+                    let (mut children, child_diags) =
+                        transform_raw_block(raw_child, content, &content_idx);
+                    diagnostics.extend(child_diags);
+                    for child in &mut children {
+                        offset_block_locations(child, base);
+                    }
+                    child_blocks.extend(children);
+                }
+                block.blocks = Some(child_blocks);
+            } else {
+                block.blocks = Some(vec![]);
+            }
         }
 
-        // Lists: items need to be transformed
+        // Lists: items need to be transformed (list items don't expand to multiple blocks)
         "list" => {
             if let Some(items) = raw.items {
                 let mut transformed_items = Vec::new();
                 for item in items {
-                    let (transformed_item, item_diags) = transform_raw_block(item, source, idx);
+                    let (transformed, item_diags) = transform_raw_block(item, source, idx);
                     diagnostics.extend(item_diags);
-                    transformed_items.push(transformed_item);
+                    // List items always produce exactly one block
+                    transformed_items.extend(transformed);
                 }
                 block.items = Some(transformed_items);
             }
@@ -148,9 +299,15 @@ pub(super) fn transform_raw_block<'src>(
                 let content = &source[principal_span.start..principal_span.end];
                 let content_tokens = lex(content);
                 let content_idx = SourceIndex::new(content);
-                let (principal, principal_diags) =
+                let (mut principal, principal_diags) =
                     run_inline_parser(&content_tokens, content, &content_idx);
                 diagnostics.extend(principal_diags);
+
+                // Adjust locations
+                let base = get_base_position(source, idx, principal_span.start);
+                for inline in &mut principal {
+                    offset_inline_location(inline, base);
+                }
                 block.principal = Some(principal);
             }
 
@@ -160,14 +317,15 @@ pub(super) fn transform_raw_block<'src>(
                 for nested in nested_blocks {
                     let (transformed, nested_diags) = transform_raw_block(nested, source, idx);
                     diagnostics.extend(nested_diags);
-                    transformed_nested.push(transformed);
+                    transformed_nested.extend(transformed);
                 }
                 block.blocks = Some(transformed_nested);
             }
         }
 
-        // Breaks: no content to transform
-        "break" => {}
+        // Breaks and headings: no content to transform
+        // (Headings are standalone with no body, from [discrete] style)
+        "break" | "heading" => {}
 
         // Default: try to parse content_span as inlines if present
         _ => {
@@ -175,18 +333,96 @@ pub(super) fn transform_raw_block<'src>(
                 let content = &source[content_span.start..content_span.end];
                 let content_tokens = lex(content);
                 let content_idx = SourceIndex::new(content);
-                let (inlines, content_diags) =
+                let (mut inlines, content_diags) =
                     run_inline_parser(&content_tokens, content, &content_idx);
                 diagnostics.extend(content_diags);
+
+                let base = get_base_position(source, idx, content_span.start);
+                for inline in &mut inlines {
+                    offset_inline_location(inline, base);
+                }
                 block.inlines = Some(inlines);
             }
         }
     }
 
-    (block, diagnostics)
+    (vec![block], diagnostics)
 }
 
-/// Transform a vector of RawBlocks into Blocks.
+/// Transform a discrete section into a heading block plus sibling blocks.
+///
+/// Discrete headings don't capture body content as children - instead, the
+/// body content becomes sibling blocks at the same level.
+fn transform_discrete_section<'src>(
+    raw: RawBlock<'src>,
+    source: &'src str,
+    idx: &SourceIndex,
+) -> (Vec<Block<'src>>, Vec<ParseDiagnostic>) {
+    let mut diagnostics = Vec::new();
+    let mut result_blocks = Vec::new();
+
+    // Create the heading block
+    let mut heading = Block::new("heading");
+    heading.level = raw.level;
+    heading.id = raw.id;
+    // Note: style is NOT copied - discrete is not shown in output
+
+    // Use heading line location instead of full section location
+    heading.location = raw.heading_line_location.or(raw.location);
+
+    // Build metadata if we have roles or options
+    if !raw.roles.is_empty() || !raw.options.is_empty() {
+        heading.metadata = Some(BlockMetadata {
+            roles: raw.roles,
+            options: raw.options,
+            attributes: std::collections::HashMap::new(),
+        });
+    }
+
+    // Parse title span as inlines
+    if let Some(title_span) = raw.title_span {
+        let title_content = &source[title_span.start..title_span.end];
+        let title_tokens = lex(title_content);
+        let title_idx = SourceIndex::new(title_content);
+        let (mut title_inlines, title_diags) =
+            run_inline_parser(&title_tokens, title_content, &title_idx);
+        diagnostics.extend(title_diags);
+
+        let base = get_base_position(source, idx, title_span.start);
+        for inline in &mut title_inlines {
+            offset_inline_location(inline, base);
+        }
+        heading.title = Some(title_inlines);
+    }
+
+    result_blocks.push(heading);
+
+    // Parse body content as sibling blocks (not children)
+    if let Some(content_span) = raw.content_span {
+        let content = &source[content_span.start..content_span.end];
+        let content_tokens = lex(content);
+        let content_idx = SourceIndex::new(content);
+        let (raw_blocks, block_diags) =
+            super::chumsky_blocks::parse_raw_blocks(&content_tokens, content, &content_idx);
+        diagnostics.extend(block_diags);
+
+        // Transform and add as siblings
+        let base = get_base_position(source, idx, content_span.start);
+        for raw_child in raw_blocks {
+            let (mut child_blocks, child_diags) =
+                transform_raw_block(raw_child, content, &content_idx);
+            diagnostics.extend(child_diags);
+            for child in &mut child_blocks {
+                offset_block_locations(child, base);
+            }
+            result_blocks.extend(child_blocks);
+        }
+    }
+
+    (result_blocks, diagnostics)
+}
+
+/// Transform a vector of `RawBlock`s into Blocks.
 pub(super) fn transform_raw_blocks<'src>(
     raw_blocks: Vec<RawBlock<'src>>,
     source: &'src str,
@@ -196,9 +432,9 @@ pub(super) fn transform_raw_blocks<'src>(
     let mut diagnostics = Vec::new();
 
     for raw in raw_blocks {
-        let (block, diags) = transform_raw_block(raw, source, idx);
+        let (transformed, diags) = transform_raw_block(raw, source, idx);
         diagnostics.extend(diags);
-        blocks.push(block);
+        blocks.extend(transformed);
     }
 
     (blocks, diagnostics)
@@ -215,8 +451,7 @@ mod tests {
         let tokens = lex(source);
         let idx = SourceIndex::new(source);
 
-        let (raw_blocks, _) =
-            super::super::chumsky_blocks::parse_raw_blocks(&tokens, source, &idx);
+        let (raw_blocks, _) = super::super::chumsky_blocks::parse_raw_blocks(&tokens, source, &idx);
         let (blocks, diags) = transform_raw_blocks(raw_blocks, source, &idx);
 
         assert!(diags.is_empty(), "diagnostics: {diags:?}");
@@ -231,8 +466,7 @@ mod tests {
         let tokens = lex(source);
         let idx = SourceIndex::new(source);
 
-        let (raw_blocks, _) =
-            super::super::chumsky_blocks::parse_raw_blocks(&tokens, source, &idx);
+        let (raw_blocks, _) = super::super::chumsky_blocks::parse_raw_blocks(&tokens, source, &idx);
         let (blocks, diags) = transform_raw_blocks(raw_blocks, source, &idx);
 
         assert!(diags.is_empty(), "diagnostics: {diags:?}");
@@ -255,8 +489,7 @@ mod tests {
         let tokens = lex(source);
         let idx = SourceIndex::new(source);
 
-        let (raw_blocks, _) =
-            super::super::chumsky_blocks::parse_raw_blocks(&tokens, source, &idx);
+        let (raw_blocks, _) = super::super::chumsky_blocks::parse_raw_blocks(&tokens, source, &idx);
         let (blocks, diags) = transform_raw_blocks(raw_blocks, source, &idx);
 
         assert!(diags.is_empty(), "diagnostics: {diags:?}");
@@ -275,8 +508,7 @@ mod tests {
         let tokens = lex(source);
         let idx = SourceIndex::new(source);
 
-        let (raw_blocks, _) =
-            super::super::chumsky_blocks::parse_raw_blocks(&tokens, source, &idx);
+        let (raw_blocks, _) = super::super::chumsky_blocks::parse_raw_blocks(&tokens, source, &idx);
         let (blocks, diags) = transform_raw_blocks(raw_blocks, source, &idx);
 
         assert!(diags.is_empty(), "diagnostics: {diags:?}");
@@ -297,8 +529,7 @@ mod tests {
         let tokens = lex(source);
         let idx = SourceIndex::new(source);
 
-        let (raw_blocks, _) =
-            super::super::chumsky_blocks::parse_raw_blocks(&tokens, source, &idx);
+        let (raw_blocks, _) = super::super::chumsky_blocks::parse_raw_blocks(&tokens, source, &idx);
         let (blocks, diags) = transform_raw_blocks(raw_blocks, source, &idx);
 
         assert!(diags.is_empty(), "diagnostics: {diags:?}");

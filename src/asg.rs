@@ -68,7 +68,7 @@ pub struct BlockMetadata<'a> {
 }
 
 /// A 1-based source position (line and column).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Position {
     /// 1-based line number.
     pub line: usize,

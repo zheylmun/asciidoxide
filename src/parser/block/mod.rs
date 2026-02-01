@@ -1,22 +1,15 @@
-//! Block/document parser: chumsky-based block structure detection.
+//! Block/document parser: pure chumsky-based block structure detection.
 //!
-//! This module uses chumsky combinators for individual block parsers with
-//! procedural orchestration for the main loop that handles metadata propagation.
+//! This module uses pure chumsky combinators for block parsing with a two-phase approach:
+//! 1. Phase 2: Identify block structure and boundaries (`RawBlock`)
+//! 2. Phase 3: Transform `RawBlock` to Block with inline parsing
 
 mod attributes;
-mod breaks;
 mod chumsky_blocks;
-mod chumsky_parser;
-mod comments;
-mod delimited;
-mod lists;
-mod metadata;
-mod paragraphs;
 mod raw_block;
-mod sections;
 mod transform;
 
-use super::{Spanned, content_span, strip_trailing_newline_index, strip_trailing_newlines};
+use super::Spanned;
 use crate::asg::Block;
 use crate::diagnostic::ParseDiagnostic;
 use crate::span::SourceIndex;
@@ -25,15 +18,17 @@ pub(super) use attributes::{HeaderResult, extract_header};
 
 /// Build block-level ASG nodes from a body token stream.
 ///
-/// Uses chumsky-based parsers for individual block types with procedural
-/// orchestration for the main loop. Blocks are separated by blank lines
-/// (two or more consecutive `Newline` tokens).
+/// Uses pure chumsky-based parsers with a two-phase approach:
+/// 1. Phase 2: Identify block structure and boundaries (`RawBlock`)
+/// 2. Phase 3: Transform `RawBlock` to Block with inline parsing
+///
+/// Blocks are separated by blank lines (two or more consecutive `Newline` tokens).
 pub(super) fn build_blocks<'src>(
     tokens: &[Spanned<'src>],
     source: &'src str,
     idx: &SourceIndex,
 ) -> (Vec<Block<'src>>, Vec<ParseDiagnostic>) {
-    chumsky_parser::build_blocks_chumsky(tokens, source, idx)
+    chumsky_blocks::build_blocks_pure_chumsky(tokens, source, idx)
 }
 
 // ---------------------------------------------------------------------------

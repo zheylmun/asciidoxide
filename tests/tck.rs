@@ -479,7 +479,7 @@ fn populate_asg_defaults(node: &mut Value) {
             .or_insert_with(|| serde_json::json!([]));
     }
 
-    // Skip for macros, breaks, and headings
+    // Skip for macros, breaks, headings, and list items
     let form = obj
         .get("form")
         .and_then(|v| v.as_str())
@@ -491,7 +491,7 @@ fn populate_asg_defaults(node: &mut Value) {
         .unwrap_or("")
         .to_string();
 
-    if form == "macro" || name == "break" || name == "heading" {
+    if form == "macro" || name == "break" || name == "heading" || name == "listItem" {
         return;
     }
 

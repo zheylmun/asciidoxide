@@ -355,7 +355,7 @@ fn merge_text_nodes<'a>(nodes: Vec<InlineNode<'a>>, source: &'a str) -> Vec<Inli
                 if prev_offset + prev.value.len() == curr_offset {
                     prev.value = &source[prev_offset..curr_offset + curr.value.len()];
                     if let (Some(prev_loc), Some(curr_loc)) = (&mut prev.location, &curr.location) {
-                        prev_loc[1] = curr_loc[1].clone();
+                        prev_loc[1] = curr_loc[1];
                     }
                     true
                 } else {

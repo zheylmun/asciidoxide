@@ -18,8 +18,8 @@ type BlockExtra<'tokens, 'src> = extra::Err<Rich<'tokens, Token<'src>, SourceSpa
 // ---------------------------------------------------------------------------
 
 /// Match end of line (Newline or end of input).
-fn line_end<'tokens, 'src: 'tokens, I>(
-) -> impl Parser<'tokens, I, (), BlockExtra<'tokens, 'src>> + Clone
+fn line_end<'tokens, 'src: 'tokens, I>()
+-> impl Parser<'tokens, I, (), BlockExtra<'tokens, 'src>> + Clone
 where
     I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
 {
@@ -27,39 +27,24 @@ where
 }
 
 /// Match one or more newlines (blank lines between blocks).
-fn blank_lines<'tokens, 'src: 'tokens, I>(
-) -> impl Parser<'tokens, I, (), BlockExtra<'tokens, 'src>> + Clone
+fn blank_lines<'tokens, 'src: 'tokens, I>()
+-> impl Parser<'tokens, I, (), BlockExtra<'tokens, 'src>> + Clone
 where
     I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
 {
     just(Token::Newline).repeated().at_least(1).ignored()
 }
 
-/// Match at least `min_count` tokens of the given type, return span and count.
-fn delimiter_min<'tokens, 'src: 'tokens, I>(
-    token: Token<'src>,
-    min_count: usize,
-) -> impl Parser<'tokens, I, (SourceSpan, usize), BlockExtra<'tokens, 'src>> + Clone
-where
-    I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
-{
-    just(token)
-        .repeated()
-        .at_least(min_count)
-        .collect::<Vec<_>>()
-        .map_with(|tokens, e| (e.span(), tokens.len()))
-}
-
 /// Consume tokens until end of line, return the content span.
-fn rest_of_line<'tokens, 'src: 'tokens, I>(
-) -> impl Parser<'tokens, I, SourceSpan, BlockExtra<'tokens, 'src>> + Clone
+fn rest_of_line<'tokens, 'src: 'tokens, I>()
+-> impl Parser<'tokens, I, SourceSpan, BlockExtra<'tokens, 'src>> + Clone
 where
     I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
 {
     any()
         .filter(|t| !matches!(t, Token::Newline))
         .repeated()
-        .map_with(|_, e| e.span())
+        .map_with(|(), e| e.span())
         .then_ignore(line_end())
 }
 
@@ -77,7 +62,7 @@ where
     just(Token::SingleQuote)
         .repeated()
         .at_least(3)
-        .map_with(move |_, e| {
+        .map_with(move |(), e| {
             let span: SourceSpan = e.span();
             let mut block = RawBlock::new("break");
             block.variant = Some("thematic");
@@ -111,8 +96,8 @@ where
 // ---------------------------------------------------------------------------
 
 /// Parse a line comment (`// ...`).
-fn line_comment<'tokens, 'src: 'tokens, I>(
-) -> impl Parser<'tokens, I, (), BlockExtra<'tokens, 'src>> + Clone
+fn line_comment<'tokens, 'src: 'tokens, I>()
+-> impl Parser<'tokens, I, (), BlockExtra<'tokens, 'src>> + Clone
 where
     I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
 {
@@ -123,21 +108,85 @@ where
 }
 
 /// Parse a block comment (`//// ... ////`).
-fn block_comment<'tokens, 'src: 'tokens, I>(
-) -> impl Parser<'tokens, I, (), BlockExtra<'tokens, 'src>> + Clone
+fn block_comment<'tokens, 'src: 'tokens, I>()
+-> impl Parser<'tokens, I, (), BlockExtra<'tokens, 'src>> + Clone
 where
     I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
 {
-    // Opening delimiter: 4+ slashes followed by newline
-    delimiter_min(Token::Slash, 4)
-        .then_ignore(just(Token::Newline))
-        .then(
-            // Content: anything until we see matching closing delimiter
-            any()
-                .repeated()
-                .then(just(Token::Newline).or_not()),
-        )
-        .ignored()
+    // Block comment uses the same matching delimiter pattern as verbatim blocks
+    custom(|inp| {
+        let before = inp.save();
+        let start_cursor = inp.cursor();
+
+        // Count opening slashes (need 4+)
+        let mut open_count = 0;
+        while matches!(inp.peek(), Some(Token::Slash)) {
+            inp.skip();
+            open_count += 1;
+        }
+
+        if open_count < 4 {
+            inp.rewind(before);
+            return Err(Rich::custom(
+                inp.span_since(&start_cursor),
+                "not enough slashes for block comment",
+            ));
+        }
+
+        // Must be followed by newline
+        if !matches!(inp.peek(), Some(Token::Newline)) {
+            inp.rewind(before);
+            return Err(Rich::custom(
+                inp.span_since(&start_cursor),
+                "expected newline after comment delimiter",
+            ));
+        }
+        inp.skip(); // consume newline
+
+        // Scan for matching closing delimiter
+        let mut at_line_start = true;
+        loop {
+            match inp.peek() {
+                None => {
+                    // End of input without closing - fail
+                    inp.rewind(before);
+                    return Err(Rich::custom(
+                        inp.span_since(&start_cursor),
+                        "unclosed block comment",
+                    ));
+                }
+                Some(Token::Newline) => {
+                    inp.skip();
+                    at_line_start = true;
+                }
+                Some(Token::Slash) if at_line_start => {
+                    // Potential closing delimiter
+                    let mut close_count = 0;
+                    while matches!(inp.peek(), Some(Token::Slash)) {
+                        inp.skip();
+                        close_count += 1;
+                    }
+
+                    // Check if counts match and at line end
+                    if close_count == open_count
+                        && (inp.peek().is_none() || matches!(inp.peek(), Some(Token::Newline)))
+                    {
+                        // Found matching closer! Consume trailing newline if present
+                        if matches!(inp.peek(), Some(Token::Newline)) {
+                            inp.skip();
+                        }
+                        return Ok(());
+                    }
+
+                    at_line_start = false;
+                }
+                _ => {
+                    inp.skip();
+                    at_line_start = false;
+                }
+            }
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -156,7 +205,7 @@ where
             any()
                 .filter(|t| !matches!(t, Token::RBracket | Token::Newline))
                 .repeated()
-                .map_with(|_, e| e.span()),
+                .map_with(|(), e| e.span()),
         )
         .then_ignore(just(Token::RBracket))
         .then_ignore(line_end())
@@ -227,40 +276,110 @@ fn parse_first_positional<'src>(part: &'src str, meta: &mut PendingMetadata<'src
 }
 
 /// Parse a block title line (`.Title`).
-fn block_title_line<'tokens, 'src: 'tokens, I>(
-) -> impl Parser<'tokens, I, PendingMetadata<'src>, BlockExtra<'tokens, 'src>> + Clone
+fn block_title_line<'tokens, 'src: 'tokens, I>()
+-> impl Parser<'tokens, I, PendingMetadata<'src>, BlockExtra<'tokens, 'src>> + Clone
 where
     I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
 {
-    just(Token::Dot)
-        .ignore_then(
-            // Must have content, and first token must not be whitespace (would be list item)
-            // Also must not be all dots (would be literal delimiter)
-            any()
-                .filter(|t| !matches!(t, Token::Newline | Token::Whitespace))
-                .then(
-                    any()
-                        .filter(|t| !matches!(t, Token::Newline))
-                        .repeated(),
-                )
-                .map_with(|_, e| e.span()),
-        )
-        .then_ignore(line_end())
-        .try_map(|span: SourceSpan, _e| {
-            // Reject if this could be a literal block delimiter (4+ dots)
-            // The span includes content after the first dot, so check its length
-            // For now, just accept - literal blocks are handled separately
-            Ok(PendingMetadata {
-                title_span: Some(span),
-                ..Default::default()
-            })
+    // Block title starts with single dot followed by non-whitespace content.
+    // We need to reject:
+    // - `. text` (ordered list item - dot followed by whitespace)
+    // - `....` or more (literal block delimiter)
+    custom(|inp| {
+        let start_cursor = inp.cursor();
+
+        // Must start with a dot
+        if !matches!(inp.peek(), Some(Token::Dot)) {
+            return Err(Rich::custom(
+                inp.span_since(&start_cursor),
+                "expected dot for block title",
+            ));
+        }
+
+        // Save position after we've verified it starts with dot
+        let after_first_dot = inp.save();
+        inp.skip(); // consume the first dot
+
+        // Check what follows
+        match inp.peek() {
+            // Whitespace means ordered list item
+            Some(Token::Whitespace) => {
+                inp.rewind(after_first_dot);
+                return Err(Rich::custom(
+                    inp.span_since(&start_cursor),
+                    "dot followed by whitespace is list item, not title",
+                ));
+            }
+            // More dots could be literal block delimiter
+            Some(Token::Dot) => {
+                // Count total dots (including the first one we already consumed)
+                let mut dot_count = 1;
+                while matches!(inp.peek(), Some(Token::Dot)) {
+                    inp.skip();
+                    dot_count += 1;
+                }
+                // If 4+ dots followed by newline/EOF, it's a literal delimiter
+                if dot_count >= 4
+                    && (inp.peek().is_none() || matches!(inp.peek(), Some(Token::Newline)))
+                {
+                    inp.rewind(after_first_dot);
+                    return Err(Rich::custom(
+                        inp.span_since(&start_cursor),
+                        "4+ dots is literal block delimiter, not title",
+                    ));
+                }
+                // Otherwise, we're parsing a title that starts with dots (e.g., "..text")
+                // Continue with what we've already consumed - the dots are part of the title
+            }
+            // Newline means empty title (invalid)
+            Some(Token::Newline) | None => {
+                inp.rewind(after_first_dot);
+                return Err(Rich::custom(
+                    inp.span_since(&start_cursor),
+                    "block title cannot be empty",
+                ));
+            }
+            // Any other token is valid title content
+            _ => {}
+        }
+
+        // Now capture the full title content from after the leading dot
+        // Note: we may have already consumed some dots if title starts with dots
+        // So capture everything we have so far plus the rest until newline
+        let current_span: SourceSpan = inp.span_since(&start_cursor);
+        let title_start = current_span.start + 1; // skip the leading dot
+        while inp.peek().is_some() && !matches!(inp.peek(), Some(Token::Newline)) {
+            inp.skip();
+        }
+        let title_end_span: SourceSpan = inp.span_since(&start_cursor);
+        let title_span = SourceSpan {
+            start: title_start,
+            end: title_end_span.end,
+        };
+
+        // Title must have content
+        if title_span.start >= title_span.end {
+            return Err(Rich::custom(
+                inp.span_since(&start_cursor),
+                "block title cannot be empty",
+            ));
+        }
+
+        // Consume trailing newline if present
+        if matches!(inp.peek(), Some(Token::Newline)) {
+            inp.skip();
+        }
+
+        Ok(PendingMetadata {
+            title_span: Some(title_span),
+            ..Default::default()
         })
+    })
 }
 
 // ---------------------------------------------------------------------------
 // Verbatim Block Parsers
 // ---------------------------------------------------------------------------
-
 
 /// Parse a verbatim block with the given delimiter.
 ///
@@ -331,7 +450,9 @@ where
                     inp.skip();
                     at_line_start = true;
                 }
-                Some(t) if at_line_start && std::mem::discriminant(&t) == delimiter_discriminant => {
+                Some(t)
+                    if at_line_start && std::mem::discriminant(&t) == delimiter_discriminant =>
+                {
                     // Potential closing delimiter - count it
                     let close_cursor = inp.cursor();
                     let close_start_span: SourceSpan = inp.span_since(&close_cursor);
@@ -445,15 +566,14 @@ where
 ///
 /// Compound blocks contain nested blocks. This version captures the content
 /// span rather than recursively parsing - the recursive parsing happens in
-/// phase 3 when converting RawBlock to Block.
+/// phase 3 when converting `RawBlock` to Block.
 fn compound_block<'tokens, 'src: 'tokens, I>(
     delimiter_token: Token<'src>,
     min_count: usize,
     block_name: &'static str,
     source: &'src str,
     idx: &'tokens SourceIndex,
-) -> impl Parser<'tokens, I, RawBlock<'src>, extra::Err<Rich<'tokens, Token<'src>, SourceSpan>>>
-       + Clone
+) -> impl Parser<'tokens, I, RawBlock<'src>, extra::Err<Rich<'tokens, Token<'src>, SourceSpan>>> + Clone
 where
     I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
 {
@@ -551,7 +671,6 @@ where
 
                 // Not a closing delimiter, rewind the delimiter tokens we consumed
                 // Actually, we can't rewind here easily. Instead, just continue.
-                at_line_start = false;
             }
 
             // Check for end of input (unclosed block)
@@ -579,8 +698,7 @@ where
 fn example_block<'tokens, 'src: 'tokens, I>(
     source: &'src str,
     idx: &'tokens SourceIndex,
-) -> impl Parser<'tokens, I, RawBlock<'src>, extra::Err<Rich<'tokens, Token<'src>, SourceSpan>>>
-       + Clone
+) -> impl Parser<'tokens, I, RawBlock<'src>, extra::Err<Rich<'tokens, Token<'src>, SourceSpan>>> + Clone
 where
     I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
 {
@@ -591,8 +709,7 @@ where
 fn sidebar_block<'tokens, 'src: 'tokens, I>(
     source: &'src str,
     idx: &'tokens SourceIndex,
-) -> impl Parser<'tokens, I, RawBlock<'src>, extra::Err<Rich<'tokens, Token<'src>, SourceSpan>>>
-       + Clone
+) -> impl Parser<'tokens, I, RawBlock<'src>, extra::Err<Rich<'tokens, Token<'src>, SourceSpan>>> + Clone
 where
     I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
 {
@@ -603,8 +720,7 @@ where
 fn quote_block<'tokens, 'src: 'tokens, I>(
     source: &'src str,
     idx: &'tokens SourceIndex,
-) -> impl Parser<'tokens, I, RawBlock<'src>, extra::Err<Rich<'tokens, Token<'src>, SourceSpan>>>
-       + Clone
+) -> impl Parser<'tokens, I, RawBlock<'src>, extra::Err<Rich<'tokens, Token<'src>, SourceSpan>>> + Clone
 where
     I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
 {
@@ -617,8 +733,7 @@ where
 fn open_block<'tokens, 'src: 'tokens, I>(
     source: &'src str,
     idx: &'tokens SourceIndex,
-) -> impl Parser<'tokens, I, RawBlock<'src>, extra::Err<Rich<'tokens, Token<'src>, SourceSpan>>>
-       + Clone
+) -> impl Parser<'tokens, I, RawBlock<'src>, extra::Err<Rich<'tokens, Token<'src>, SourceSpan>>> + Clone
 where
     I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
 {
@@ -629,12 +744,18 @@ where
 
         // Check for exactly 2 hyphens
         if !matches!(inp.peek(), Some(Token::Hyphen)) {
-            return Err(Rich::custom(inp.span_since(&start_cursor), "expected hyphen"));
+            return Err(Rich::custom(
+                inp.span_since(&start_cursor),
+                "expected hyphen",
+            ));
         }
         inp.skip();
         if !matches!(inp.peek(), Some(Token::Hyphen)) {
             inp.rewind(before);
-            return Err(Rich::custom(inp.span_since(&start_cursor), "expected hyphen"));
+            return Err(Rich::custom(
+                inp.span_since(&start_cursor),
+                "expected hyphen",
+            ));
         }
         inp.skip();
 
@@ -711,8 +832,6 @@ where
                         }
                     }
                 }
-
-                at_line_start = false;
             }
 
             // Check for end of input
@@ -747,8 +866,8 @@ where
 /// - `=== Title` is level 2
 /// - etc.
 ///
-/// In phase 2, we just capture the title span. The section body (all content
-/// until a same-or-higher-level heading) is handled separately.
+/// The section captures both the title and the body content (everything until
+/// a same-or-higher-level heading or end of input).
 fn section_heading<'tokens, 'src: 'tokens, I>(
     source: &'src str,
     idx: &'tokens SourceIndex,
@@ -801,22 +920,87 @@ where
             ));
         }
 
+        // Capture heading line span (from start to end of title, before newline)
+        let heading_line_span: SourceSpan = inp.span_since(&start_cursor);
+
         // Consume trailing newline if present
         if matches!(inp.peek(), Some(Token::Newline)) {
             inp.skip();
         }
 
-        let block_span: SourceSpan = inp.span_since(&start_cursor);
         let level = eq_count - 1;
+
+        // Capture body content: everything until next same-or-higher-level heading or EOF
+        let body_cursor = inp.cursor();
+        let body_start_span: SourceSpan = inp.span_since(&body_cursor);
+        let body_start = body_start_span.start;
+
+        // Scan for section end
+        let mut at_line_start = true;
+        loop {
+            match inp.peek() {
+                None => {
+                    // End of input - section ends here
+                    break;
+                }
+                Some(Token::Newline) => {
+                    inp.skip();
+                    at_line_start = true;
+                }
+                Some(Token::Eq) if at_line_start => {
+                    // Potential section heading - check its level
+                    let check_before = inp.save();
+                    let mut check_eq_count = 0;
+                    while matches!(inp.peek(), Some(Token::Eq)) {
+                        inp.skip();
+                        check_eq_count += 1;
+                    }
+
+                    // Check if this is a valid section heading (followed by whitespace)
+                    if check_eq_count >= 2 && matches!(inp.peek(), Some(Token::Whitespace)) {
+                        let check_level = check_eq_count - 1;
+                        if check_level <= level {
+                            // Found same or higher level section - rewind and stop
+                            inp.rewind(check_before);
+                            break;
+                        }
+                    }
+
+                    // Not a section heading or lower level - continue
+                    // Don't rewind, we've already consumed the Eq tokens
+                    at_line_start = false;
+                }
+                _ => {
+                    inp.skip();
+                    at_line_start = false;
+                }
+            }
+        }
+
+        let body_end_span: SourceSpan = inp.span_since(&body_cursor);
+        let body_end = body_end_span.end;
+
+        // Trim trailing newlines from body content
+        let mut actual_body_end = body_end;
+        while actual_body_end > body_start
+            && source.as_bytes().get(actual_body_end - 1) == Some(&b'\n')
+        {
+            actual_body_end -= 1;
+        }
+
+        let block_span: SourceSpan = inp.span_since(&start_cursor);
 
         let mut block = RawBlock::new("section");
         block.level = Some(level);
         block.title_span = Some(title_span);
+        block.heading_line_location = Some(idx.location(&heading_line_span));
+        if body_start < actual_body_end {
+            block.content_span = Some(SourceSpan {
+                start: body_start,
+                end: actual_body_end,
+            });
+        }
         block.location = Some(idx.location(&block_span));
-
-        // Store the section marker for later (may be useful)
-        let marker_end = block_span.start + eq_count;
-        block.marker = Some(&source[block_span.start..marker_end]);
 
         Ok(block)
     })
@@ -906,12 +1090,14 @@ where
     }
     let content_span: SourceSpan = inp.span_since(&content_cursor);
 
+    // Calculate item span BEFORE consuming trailing newline
+    // (location should end at end of content, not include the newline)
+    let item_span: SourceSpan = inp.span_since(&start_cursor);
+
     // Consume trailing newline if present
     if matches!(inp.peek(), Some(Token::Newline)) {
         inp.skip();
     }
-
-    let item_span: SourceSpan = inp.span_since(&start_cursor);
 
     let mut item = RawBlock::new("listItem");
     item.marker = Some(marker.trim_end());
@@ -927,6 +1113,7 @@ where
 ///
 /// Unordered lists use `*` markers, ordered use `.` markers.
 /// Nesting is determined by marker count (`**` is deeper than `*`).
+#[allow(clippy::too_many_lines)]
 fn list<'tokens, 'src: 'tokens, I>(
     marker_token: Token<'src>,
     variant: &'static str,
@@ -1042,7 +1229,8 @@ where
                     }
                     inp.rewind(before_nested);
 
-                    if let Some(item) = parse_list_item(inp, &marker_token, nested_level, source, idx)
+                    if let Some(item) =
+                        parse_list_item(inp, &marker_token, nested_level, source, idx)
                     {
                         nested_items.push(item);
                     } else {
@@ -1142,7 +1330,7 @@ where
         .filter(|t| !matches!(t, Token::Newline))
         .repeated()
         .at_least(1)
-        .map_with(move |_, e| {
+        .map_with(move |(), e| {
             let span: SourceSpan = e.span();
             let mut block = RawBlock::new("paragraph");
             block.content_span = Some(span);
@@ -1159,6 +1347,7 @@ where
 /// Result type for the metadata/block parsing.
 /// Either metadata to apply to next block, or a parsed block.
 #[derive(Clone)]
+#[allow(clippy::large_enum_variant)]
 enum ParseItem<'src> {
     /// Metadata to apply to next block.
     Metadata(PendingMetadata<'src>),
@@ -1185,9 +1374,10 @@ where
 {
     // Individual item parsers
     let item = choice((
-        // Comments (skip)
-        line_comment().to(ParseItem::Skip),
+        // Comments (skip) - block_comment must come before line_comment
+        // because //// starts with // which would match line_comment
         block_comment().to(ParseItem::Skip),
+        line_comment().to(ParseItem::Skip),
         // Metadata (accumulate)
         block_attr_line(source).map(ParseItem::Metadata),
         block_title_line().map(ParseItem::Metadata),
@@ -1241,6 +1431,15 @@ fn fold_items(items: Vec<ParseItem<'_>>) -> Vec<RawBlock<'_>> {
                 }
             }
             ParseItem::Block(mut block) => {
+                // Check if [comment] style - skip this block entirely
+                if pending_meta
+                    .as_ref()
+                    .is_some_and(PendingMetadata::is_comment)
+                {
+                    pending_meta = None;
+                    continue; // Skip this block
+                }
+
                 // Apply pending metadata to block
                 if let Some(meta) = pending_meta.take() {
                     meta.apply_to(&mut block);
@@ -1326,7 +1525,7 @@ pub(super) fn parse_raw_blocks<'src>(
 /// Build blocks from a token stream using pure chumsky parsing.
 ///
 /// This combines Phase 2 (block boundary identification) and Phase 3
-/// (RawBlock → Block transformation with inline parsing).
+/// (`RawBlock` → Block transformation with inline parsing).
 pub(super) fn build_blocks_pure_chumsky<'src>(
     tokens: &[Spanned<'src>],
     source: &'src str,
@@ -1402,6 +1601,45 @@ mod tests {
         assert_eq!(meta.id, Some("myid"));
         assert_eq!(meta.roles, vec!["role1", "role2"]);
         assert_eq!(meta.options, vec!["opt1"]);
+    }
+
+    #[test]
+    fn test_literal_block_no_trailing_newline() {
+        let source = "....\nline one\n\nline two\n....";
+        let tokens = lex(source);
+        let idx = SourceIndex::new(source);
+
+        let (blocks, diags) = parse_raw_blocks(&tokens, source, &idx);
+
+        assert!(diags.is_empty(), "diagnostics: {diags:?}");
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].name, "literal");
+    }
+
+    #[test]
+    fn test_block_comment_alone() {
+        let source = "////\ncomment\n////\n";
+        let tokens = lex(source);
+        let idx = SourceIndex::new(source);
+
+        let (blocks, diags) = parse_raw_blocks(&tokens, source, &idx);
+
+        assert!(diags.is_empty(), "diagnostics: {diags:?}");
+        assert_eq!(blocks.len(), 0, "block comment should be skipped");
+    }
+
+    #[test]
+    fn test_block_comment_skipped() {
+        let source = "first\n\n////\ncomment\n////\n\nsecond";
+        let tokens = lex(source);
+        let idx = SourceIndex::new(source);
+
+        let (blocks, diags) = parse_raw_blocks(&tokens, source, &idx);
+
+        assert!(diags.is_empty(), "diagnostics: {diags:?}");
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].name, "paragraph");
+        assert_eq!(blocks[1].name, "paragraph");
     }
 
     #[test]
@@ -1591,12 +1829,18 @@ mod tests {
         assert_eq!(items.len(), 2);
 
         // First item should have nested list in its blocks
-        let nested = items[0].blocks.as_ref().expect("first item should have blocks");
+        let nested = items[0]
+            .blocks
+            .as_ref()
+            .expect("first item should have blocks");
         assert_eq!(nested.len(), 1);
         assert_eq!(nested[0].name, "list");
         assert_eq!(nested[0].variant, Some("unordered"));
 
-        let nested_items = nested[0].items.as_ref().expect("nested list should have items");
+        let nested_items = nested[0]
+            .items
+            .as_ref()
+            .expect("nested list should have items");
         assert_eq!(nested_items.len(), 1);
         assert_eq!(nested_items[0].marker, Some("**"));
     }
