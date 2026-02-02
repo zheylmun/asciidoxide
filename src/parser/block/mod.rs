@@ -5,7 +5,7 @@
 //! 2. Phase 3: Transform `RawBlock` to Block with inline parsing
 
 mod attributes;
-mod chumsky_blocks;
+mod boundary;
 mod raw_block;
 mod transform;
 
@@ -28,7 +28,7 @@ pub(super) fn build_blocks<'src>(
     source: &'src str,
     idx: &SourceIndex,
 ) -> (Vec<Block<'src>>, Vec<ParseDiagnostic>) {
-    chumsky_blocks::build_blocks_pure_chumsky(tokens, source, idx)
+    boundary::build_blocks_pure(tokens, source, idx)
 }
 
 // ---------------------------------------------------------------------------

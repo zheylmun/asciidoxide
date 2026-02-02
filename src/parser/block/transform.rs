@@ -229,7 +229,7 @@ pub(super) fn transform_raw_block<'src>(
                 let content_tokens = lex(content);
                 let content_idx = SourceIndex::new(content);
                 let (raw_blocks, block_diags) =
-                    super::chumsky_blocks::parse_raw_blocks(&content_tokens, content, &content_idx);
+                    super::boundary::parse_raw_blocks(&content_tokens, content, &content_idx);
                 diagnostics.extend(block_diags);
 
                 // Recursively transform child blocks
@@ -258,7 +258,7 @@ pub(super) fn transform_raw_block<'src>(
                 let content_tokens = lex(content);
                 let content_idx = SourceIndex::new(content);
                 let (raw_blocks, block_diags) =
-                    super::chumsky_blocks::parse_raw_blocks(&content_tokens, content, &content_idx);
+                    super::boundary::parse_raw_blocks(&content_tokens, content, &content_idx);
                 diagnostics.extend(block_diags);
 
                 // Recursively transform child blocks
@@ -403,7 +403,7 @@ fn transform_discrete_section<'src>(
         let content_tokens = lex(content);
         let content_idx = SourceIndex::new(content);
         let (raw_blocks, block_diags) =
-            super::chumsky_blocks::parse_raw_blocks(&content_tokens, content, &content_idx);
+            super::boundary::parse_raw_blocks(&content_tokens, content, &content_idx);
         diagnostics.extend(block_diags);
 
         // Transform and add as siblings
@@ -451,7 +451,7 @@ mod tests {
         let tokens = lex(source);
         let idx = SourceIndex::new(source);
 
-        let (raw_blocks, _) = super::super::chumsky_blocks::parse_raw_blocks(&tokens, source, &idx);
+        let (raw_blocks, _) = super::super::boundary::parse_raw_blocks(&tokens, source, &idx);
         let (blocks, diags) = transform_raw_blocks(raw_blocks, source, &idx);
 
         assert!(diags.is_empty(), "diagnostics: {diags:?}");
@@ -466,7 +466,7 @@ mod tests {
         let tokens = lex(source);
         let idx = SourceIndex::new(source);
 
-        let (raw_blocks, _) = super::super::chumsky_blocks::parse_raw_blocks(&tokens, source, &idx);
+        let (raw_blocks, _) = super::super::boundary::parse_raw_blocks(&tokens, source, &idx);
         let (blocks, diags) = transform_raw_blocks(raw_blocks, source, &idx);
 
         assert!(diags.is_empty(), "diagnostics: {diags:?}");
@@ -489,7 +489,7 @@ mod tests {
         let tokens = lex(source);
         let idx = SourceIndex::new(source);
 
-        let (raw_blocks, _) = super::super::chumsky_blocks::parse_raw_blocks(&tokens, source, &idx);
+        let (raw_blocks, _) = super::super::boundary::parse_raw_blocks(&tokens, source, &idx);
         let (blocks, diags) = transform_raw_blocks(raw_blocks, source, &idx);
 
         assert!(diags.is_empty(), "diagnostics: {diags:?}");
@@ -508,7 +508,7 @@ mod tests {
         let tokens = lex(source);
         let idx = SourceIndex::new(source);
 
-        let (raw_blocks, _) = super::super::chumsky_blocks::parse_raw_blocks(&tokens, source, &idx);
+        let (raw_blocks, _) = super::super::boundary::parse_raw_blocks(&tokens, source, &idx);
         let (blocks, diags) = transform_raw_blocks(raw_blocks, source, &idx);
 
         assert!(diags.is_empty(), "diagnostics: {diags:?}");
@@ -529,7 +529,7 @@ mod tests {
         let tokens = lex(source);
         let idx = SourceIndex::new(source);
 
-        let (raw_blocks, _) = super::super::chumsky_blocks::parse_raw_blocks(&tokens, source, &idx);
+        let (raw_blocks, _) = super::super::boundary::parse_raw_blocks(&tokens, source, &idx);
         let (blocks, diags) = transform_raw_blocks(raw_blocks, source, &idx);
 
         assert!(diags.is_empty(), "diagnostics: {diags:?}");

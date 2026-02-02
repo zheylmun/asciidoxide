@@ -186,7 +186,7 @@ where
 }
 
 /// Run the chumsky inline parser on a token sub-slice without text merging.
-fn run_chumsky_inline<'tokens, 'src: 'tokens>(
+fn run_inline_parser_without_merging<'tokens, 'src: 'tokens>(
     tokens: &'tokens [Spanned<'src>],
     source: &'src str,
     idx: &'tokens SourceIndex,
@@ -240,7 +240,7 @@ pub(super) fn run_inline_parser<'tokens, 'src: 'tokens>(
 
     if macros.is_empty() {
         let empty: &[InlineNode<'src>] = &[];
-        let (nodes, diagnostics) = run_chumsky_inline(tokens, source, idx, empty);
+        let (nodes, diagnostics) = run_inline_parser_without_merging(tokens, source, idx, empty);
         return (merge_text_nodes(nodes, source), diagnostics);
     }
 
@@ -267,7 +267,8 @@ pub(super) fn run_inline_parser<'tokens, 'src: 'tokens>(
             MacroType::Ref { variant } => {
                 let ref_inlines = if let Some((cs, ce)) = m.content_tok_range {
                     let content_tokens = &tokens[cs..ce];
-                    let (nodes, diags) = run_chumsky_inline(content_tokens, source, idx, empty);
+                    let (nodes, diags) =
+                        run_inline_parser_without_merging(content_tokens, source, idx, empty);
                     diagnostics.extend(diags);
                     nodes
                 } else {
@@ -313,7 +314,8 @@ pub(super) fn run_inline_parser<'tokens, 'src: 'tokens>(
     // Copy tokens after the last macro.
     unified.extend_from_slice(&tokens[pos..]);
 
-    let (nodes, chumsky_diags) = run_chumsky_inline(&unified, source, idx, &pre_parsed);
+    let (nodes, chumsky_diags) =
+        run_inline_parser_without_merging(&unified, source, idx, &pre_parsed);
     diagnostics.extend(chumsky_diags);
 
     (merge_text_nodes(nodes, source), diagnostics)

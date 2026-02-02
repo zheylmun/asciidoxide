@@ -1318,26 +1318,237 @@ where
 // Paragraph Parser
 // ---------------------------------------------------------------------------
 
+/// Check if current position looks like a block interrupt pattern.
+///
+/// This checks for patterns that should end a paragraph:
+/// - Block delimiters (`----`, `====`, `****`, `....`, `++++`, `--`)
+/// - Section headings (`== Title`)
+/// - List markers (`*`, `.` at line start followed by space)
+/// - Block attribute lines (`[...]`)
+/// - Block title lines (`.Title` - single dot followed by non-space)
+/// - Thematic break (`'''`)
+/// - Page break (`<<<`)
+fn is_block_interrupt<'tokens, 'src: 'tokens, I>(
+    inp: &mut chumsky::input::InputRef<'tokens, '_, I, BlockExtra<'tokens, 'src>>,
+) -> bool
+where
+    I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
+{
+    let before = inp.save();
+    let result = check_block_interrupt_impl(inp);
+    inp.rewind(before);
+    result
+}
+
+/// Implementation of block interrupt checking (consumes tokens, caller must rewind).
+fn check_block_interrupt_impl<'tokens, 'src: 'tokens, I>(
+    inp: &mut chumsky::input::InputRef<'tokens, '_, I, BlockExtra<'tokens, 'src>>,
+) -> bool
+where
+    I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
+{
+    match inp.peek() {
+        // End of input or block attribute line [...]
+        None | Some(Token::LBracket) => true,
+
+        // Section heading (== Title) - need 2+ equals followed by whitespace
+        Some(Token::Eq) => {
+            let mut count = 0;
+            while matches!(inp.peek(), Some(Token::Eq)) {
+                inp.skip();
+                count += 1;
+            }
+            count >= 2 && matches!(inp.peek(), Some(Token::Whitespace))
+        }
+
+        // Unordered list marker (* item) or sidebar delimiter (****)
+        Some(Token::Star) => {
+            let mut count = 0;
+            while matches!(inp.peek(), Some(Token::Star)) {
+                inp.skip();
+                count += 1;
+            }
+            // Single star + whitespace = list item
+            // 4+ stars + newline/EOF = sidebar delimiter
+            (count == 1 && matches!(inp.peek(), Some(Token::Whitespace)))
+                || (count >= 4
+                    && (inp.peek().is_none() || matches!(inp.peek(), Some(Token::Newline))))
+        }
+
+        // Ordered list marker (. item) or literal block (....)
+        // Also block title (.Title)
+        Some(Token::Dot) => {
+            let mut count = 0;
+            while matches!(inp.peek(), Some(Token::Dot)) {
+                inp.skip();
+                count += 1;
+            }
+            // Single dot + whitespace = list item
+            // Single dot + non-whitespace/non-newline = block title
+            // 4+ dots + newline/EOF = literal delimiter
+            if count == 1 {
+                // Single dot: list item (. foo) or block title (.Title)
+                // Not a title if followed by newline or EOF
+                !matches!(inp.peek(), Some(Token::Newline) | None)
+            } else {
+                count >= 4 && (inp.peek().is_none() || matches!(inp.peek(), Some(Token::Newline)))
+            }
+        }
+
+        // Listing block (----) or open block (--)
+        Some(Token::Hyphen) => {
+            let mut count = 0;
+            while matches!(inp.peek(), Some(Token::Hyphen)) {
+                inp.skip();
+                count += 1;
+            }
+            // 2 hyphens + newline/EOF = open block
+            // 4+ hyphens + newline/EOF = listing delimiter
+            (count == 2 || count >= 4)
+                && (inp.peek().is_none() || matches!(inp.peek(), Some(Token::Newline)))
+        }
+
+        // Example block (====)
+        // Note: We already handled Eq for section headings, but 4+ equals at line start
+        // could also be example block. The section check requires whitespace after,
+        // so 4+ equals followed by newline would be example block.
+        // Actually Eq is already handled above, so this case won't be reached.
+
+        // Passthrough block (++++)
+        Some(Token::Plus) => {
+            let mut count = 0;
+            while matches!(inp.peek(), Some(Token::Plus)) {
+                inp.skip();
+                count += 1;
+            }
+            count >= 4 && (inp.peek().is_none() || matches!(inp.peek(), Some(Token::Newline)))
+        }
+
+        // Quote block (____)
+        Some(Token::Underscore) => {
+            let mut count = 0;
+            while matches!(inp.peek(), Some(Token::Underscore)) {
+                inp.skip();
+                count += 1;
+            }
+            count >= 4 && (inp.peek().is_none() || matches!(inp.peek(), Some(Token::Newline)))
+        }
+
+        // Thematic break (''')
+        Some(Token::SingleQuote) => {
+            let mut count = 0;
+            while matches!(inp.peek(), Some(Token::SingleQuote)) {
+                inp.skip();
+                count += 1;
+            }
+            count >= 3 && (inp.peek().is_none() || matches!(inp.peek(), Some(Token::Newline)))
+        }
+
+        // Comment (// or ////)
+        Some(Token::Slash) => {
+            inp.skip();
+            matches!(inp.peek(), Some(Token::Slash))
+        }
+
+        // Page break (<<<)
+        Some(Token::DoubleLeftAngle) => {
+            inp.skip();
+            matches!(inp.peek(), Some(Token::Text("<")))
+        }
+
+        // Fenced code block (```)
+        Some(Token::Backtick) => {
+            let mut count = 0;
+            while matches!(inp.peek(), Some(Token::Backtick)) {
+                inp.skip();
+                count += 1;
+            }
+            count >= 3
+        }
+
+        _ => false,
+    }
+}
+
 /// Parse a paragraph (fallback for unrecognized content).
+///
+/// A paragraph consists of one or more contiguous lines of text.
+/// It ends at:
+/// - A blank line (empty line / two newlines)
+/// - A block delimiter or other block-starting pattern
+/// - End of input
 fn paragraph<'tokens, 'src: 'tokens, I>(
     idx: &'tokens SourceIndex,
 ) -> impl Parser<'tokens, I, RawBlock<'src>, BlockExtra<'tokens, 'src>> + Clone
 where
     I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
 {
-    // Collect tokens until blank line (two newlines) or block delimiter
-    any()
-        .filter(|t| !matches!(t, Token::Newline))
-        .repeated()
-        .at_least(1)
-        .map_with(move |(), e| {
-            let span: SourceSpan = e.span();
-            let mut block = RawBlock::new("paragraph");
-            block.content_span = Some(span);
-            block.location = Some(idx.location(&span));
-            block
-        })
-        .then_ignore(line_end())
+    custom(move |inp| {
+        let start_cursor = inp.cursor();
+
+        // Must have at least some content
+        if inp.peek().is_none() || matches!(inp.peek(), Some(Token::Newline)) {
+            return Err(Rich::custom(
+                inp.span_since(&start_cursor),
+                "empty paragraph",
+            ));
+        }
+
+        // Consume lines until we hit a paragraph boundary
+        loop {
+            // Consume content on current line
+            while inp.peek().is_some() && !matches!(inp.peek(), Some(Token::Newline)) {
+                inp.skip();
+            }
+
+            // Check what's after the newline
+            if inp.peek().is_none() {
+                // End of input - paragraph ends here
+                break;
+            }
+
+            // We're at a newline
+            debug_assert!(matches!(inp.peek(), Some(Token::Newline)));
+
+            // Peek ahead: is next line blank or a block interrupt?
+            let before_newline = inp.save();
+            inp.skip(); // consume the newline
+
+            // Check for blank line (another newline immediately)
+            if inp.peek().is_none() || matches!(inp.peek(), Some(Token::Newline)) {
+                // Blank line or EOF - paragraph ends before this newline
+                inp.rewind(before_newline);
+                break;
+            }
+
+            // Check for block interrupt pattern
+            if is_block_interrupt(inp) {
+                // Block interrupt - paragraph ends before this newline
+                inp.rewind(before_newline);
+                break;
+            }
+
+            // Continue with next line (newline is part of paragraph content)
+            // We've already consumed the newline, continue the loop
+        }
+
+        let content_span: SourceSpan = inp.span_since(&start_cursor);
+
+        // Consume trailing newline if present
+        if matches!(inp.peek(), Some(Token::Newline)) {
+            inp.skip();
+        }
+
+        if content_span.start >= content_span.end {
+            return Err(Rich::custom(content_span, "empty paragraph"));
+        }
+
+        let mut block = RawBlock::new("paragraph");
+        block.content_span = Some(content_span);
+        block.location = Some(idx.location(&content_span));
+
+        Ok(block)
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1526,7 +1737,7 @@ pub(super) fn parse_raw_blocks<'src>(
 ///
 /// This combines Phase 2 (block boundary identification) and Phase 3
 /// (`RawBlock` → Block transformation with inline parsing).
-pub(super) fn build_blocks_pure_chumsky<'src>(
+pub(super) fn build_blocks_pure<'src>(
     tokens: &[Spanned<'src>],
     source: &'src str,
     idx: &SourceIndex,
@@ -1590,6 +1801,64 @@ mod tests {
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].name, "paragraph");
         assert!(blocks[0].content_span.is_some());
+    }
+
+    #[test]
+    fn test_multiline_paragraph() {
+        let source = "line one\nline two\nline three\n";
+        let tokens = lex(source);
+        let idx = SourceIndex::new(source);
+
+        let (blocks, diags) = parse_raw_blocks(&tokens, source, &idx);
+
+        assert!(diags.is_empty(), "diagnostics: {diags:?}");
+        assert_eq!(
+            blocks.len(),
+            1,
+            "should be single paragraph, got {blocks:?}"
+        );
+        assert_eq!(blocks[0].name, "paragraph");
+
+        let span = blocks[0].content_span.expect("should have content span");
+        let content = &source[span.start..span.end];
+        assert_eq!(content, "line one\nline two\nline three");
+    }
+
+    #[test]
+    fn test_multiline_paragraph_ends_at_blank_line() {
+        let source = "para one\nstill para one\n\npara two\n";
+        let tokens = lex(source);
+        let idx = SourceIndex::new(source);
+
+        let (blocks, diags) = parse_raw_blocks(&tokens, source, &idx);
+
+        assert!(diags.is_empty(), "diagnostics: {diags:?}");
+        assert_eq!(blocks.len(), 2, "should be two paragraphs");
+
+        let span1 = blocks[0].content_span.expect("first para should have span");
+        assert_eq!(&source[span1.start..span1.end], "para one\nstill para one");
+
+        let span2 = blocks[1]
+            .content_span
+            .expect("second para should have span");
+        assert_eq!(&source[span2.start..span2.end], "para two");
+    }
+
+    #[test]
+    fn test_multiline_paragraph_ends_at_block_delimiter() {
+        let source = "paragraph text\ncontinued\n----\ncode\n----\n";
+        let tokens = lex(source);
+        let idx = SourceIndex::new(source);
+
+        let (blocks, diags) = parse_raw_blocks(&tokens, source, &idx);
+
+        assert!(diags.is_empty(), "diagnostics: {diags:?}");
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].name, "paragraph");
+        assert_eq!(blocks[1].name, "listing");
+
+        let span = blocks[0].content_span.expect("paragraph should have span");
+        assert_eq!(&source[span.start..span.end], "paragraph text\ncontinued");
     }
 
     #[test]
@@ -1853,7 +2122,7 @@ mod tests {
         let tokens = lex(source);
         let idx = SourceIndex::new(source);
 
-        let (blocks, diags) = build_blocks_pure_chumsky(&tokens, source, &idx);
+        let (blocks, diags) = build_blocks_pure(&tokens, source, &idx);
 
         assert!(diags.is_empty(), "diagnostics: {diags:?}");
         assert_eq!(blocks.len(), 1);
@@ -1870,7 +2139,7 @@ mod tests {
         let tokens = lex(source);
         let idx = SourceIndex::new(source);
 
-        let (blocks, diags) = build_blocks_pure_chumsky(&tokens, source, &idx);
+        let (blocks, diags) = build_blocks_pure(&tokens, source, &idx);
 
         assert!(diags.is_empty(), "diagnostics: {diags:?}");
         assert_eq!(blocks.len(), 1);
@@ -1889,7 +2158,7 @@ mod tests {
         let tokens = lex(source);
         let idx = SourceIndex::new(source);
 
-        let (blocks, diags) = build_blocks_pure_chumsky(&tokens, source, &idx);
+        let (blocks, diags) = build_blocks_pure(&tokens, source, &idx);
 
         assert!(diags.is_empty(), "diagnostics: {diags:?}");
         assert_eq!(blocks.len(), 1);
