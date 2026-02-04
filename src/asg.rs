@@ -21,6 +21,8 @@ pub enum AttributeValue<'a> {
     /// Each element is a line segment; when resolved, segments are directly
     /// concatenated (trailing whitespace preserved, no separator added).
     MultilineLegacy(Vec<&'a str>),
+    /// A value with attribute references already resolved (owned string).
+    Resolved(String),
 }
 
 impl<'a> AttributeValue<'a> {
@@ -35,17 +37,19 @@ impl<'a> AttributeValue<'a> {
             Self::Single(s) => Cow::Borrowed(s),
             Self::Multiline(segments) => Cow::Owned(segments.join(" ")),
             Self::MultilineLegacy(segments) => Cow::Owned(segments.concat()),
+            Self::Resolved(s) => Cow::Owned(s.clone()),
         }
     }
 
     /// Returns the value as a `&str` if it's a single-line value.
     ///
-    /// Returns `None` for multiline values (use [`resolve()`](Self::resolve) instead).
+    /// Returns `None` for multiline or resolved values
+    /// (use [`resolve()`](Self::resolve) instead).
     #[must_use]
     pub fn as_str(&self) -> Option<&'a str> {
         match self {
             Self::Single(s) => Some(s),
-            Self::Multiline(_) | Self::MultilineLegacy(_) => None,
+            Self::Multiline(_) | Self::MultilineLegacy(_) | Self::Resolved(_) => None,
         }
     }
 
@@ -92,11 +96,30 @@ pub struct Document<'a> {
     pub location: Option<Location>,
 }
 
+/// A document author.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Author<'a> {
+    /// Full name (e.g., `"Doc Writer"`).
+    pub fullname: &'a str,
+    /// Initials derived from name parts (e.g., `"DW"`).
+    pub initials: String,
+    /// First name.
+    pub firstname: &'a str,
+    /// Middle name (if present).
+    pub middlename: Option<&'a str>,
+    /// Last name (if present).
+    pub lastname: Option<&'a str>,
+    /// Email address (from `<email>` syntax).
+    pub address: Option<&'a str>,
+}
+
 /// A document header containing a title and optional metadata.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Header<'a> {
     /// Title as inline nodes.
     pub title: Vec<InlineNode<'a>>,
+    /// Document authors.
+    pub authors: Option<Vec<Author<'a>>>,
     /// Source location of the header.
     pub location: Option<Location>,
 }
@@ -111,9 +134,12 @@ pub struct Block<'a> {
     /// Delimiter string for delimited blocks.
     pub delimiter: Option<&'a str>,
     /// Block or section ID (e.g., from `[[id]]` or `[#id]`).
-    pub id: Option<&'a str>,
+    /// Uses `Cow` to support both borrowed explicit IDs and owned auto-generated IDs.
+    pub id: Option<Cow<'a, str>>,
     /// Block style (e.g., `"appendix"`, `"discrete"`, `"source"`, `"abstract"`).
     pub style: Option<&'a str>,
+    /// Target for block macros (e.g., image path).
+    pub target: Option<&'a str>,
     /// Reference text for cross-references (e.g., from `[[id,reftext]]`), as inline nodes.
     pub reftext: Option<Vec<InlineNode<'a>>>,
     /// Block metadata (roles, options, attributes).
@@ -134,6 +160,8 @@ pub struct Block<'a> {
     pub items: Option<Vec<Block<'a>>>,
     /// Principal content of a list item.
     pub principal: Option<Vec<InlineNode<'a>>>,
+    /// Description list item terms (each term is a group of inline nodes).
+    pub terms: Option<Vec<Vec<InlineNode<'a>>>>,
     /// Source location.
     pub location: Option<Location>,
 }
@@ -148,6 +176,7 @@ impl Block<'_> {
             delimiter: None,
             id: None,
             style: None,
+            target: None,
             reftext: None,
             metadata: None,
             title: None,
@@ -158,6 +187,7 @@ impl Block<'_> {
             blocks: None,
             items: None,
             principal: None,
+            terms: None,
             location: None,
         }
     }

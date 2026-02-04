@@ -220,19 +220,42 @@ fn parse_attr_content(content: &str) -> PendingMetadata<'_> {
     let mut meta = PendingMetadata::default();
 
     // Split by comma for multiple arguments
-    let mut first = true;
+    let mut positional_index = 0;
     for part in content.split(',') {
         let part = part.trim();
-        if part.is_empty() {
+
+        // Check for named attribute: key=value
+        if let Some(eq_pos) = part.find('=') {
+            let key = part[..eq_pos].trim();
+            let value = part[eq_pos + 1..].trim();
+            // Strip surrounding quotes from value if present
+            let value = if (value.starts_with('"') && value.ends_with('"'))
+                || (value.starts_with('\'') && value.ends_with('\''))
+            {
+                &value[1..value.len() - 1]
+            } else {
+                value
+            };
+            if !key.is_empty() {
+                if key == "id" {
+                    meta.id = Some(value);
+                } else {
+                    meta.named_attributes.insert(key, value);
+                }
+            }
             continue;
         }
 
-        if first {
-            first = false;
+        if positional_index == 0 {
             // First positional may contain style#id.role%opt
-            parse_first_positional(part, &mut meta);
+            if !part.is_empty() {
+                parse_first_positional(part, &mut meta);
+            }
+            meta.positionals.push(part);
+        } else {
+            meta.positionals.push(part);
         }
-        // Additional positionals are ignored for now (could be attribution, etc.)
+        positional_index += 1;
     }
 
     meta
@@ -273,6 +296,119 @@ fn parse_first_positional<'src>(part: &'src str, meta: &mut PendingMetadata<'src
             rest = &rest[1..];
         }
     }
+}
+
+/// Validate that an anchor ID contains only valid characters.
+///
+/// Valid anchor IDs: alphanumeric, `_`, `-`, `.`, `:`.
+fn is_valid_anchor_id(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' || c == ':')
+}
+
+/// Parse a block anchor line (`[[id]]` or `[[id,reftext]]`).
+fn block_anchor_line<'tokens, 'src: 'tokens, I>(
+    source: &'src str,
+) -> impl Parser<'tokens, I, PendingMetadata<'src>, BlockExtra<'tokens, 'src>> + Clone
+where
+    I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
+{
+    custom(move |inp| {
+        let before = inp.save();
+        let start_cursor = inp.cursor();
+
+        // Must start with [[
+        if !matches!(inp.peek(), Some(Token::LBracket)) {
+            return Err(Rich::custom(
+                inp.span_since(&start_cursor),
+                "expected [ for anchor",
+            ));
+        }
+        inp.skip();
+        if !matches!(inp.peek(), Some(Token::LBracket)) {
+            inp.rewind(before);
+            return Err(Rich::custom(
+                inp.span_since(&start_cursor),
+                "expected [[ for anchor",
+            ));
+        }
+        inp.skip();
+
+        // Capture content between [[ and ]]
+        let content_cursor = inp.cursor();
+        while inp.peek().is_some() && !matches!(inp.peek(), Some(Token::RBracket | Token::Newline))
+        {
+            inp.skip();
+        }
+        let content_span: SourceSpan = inp.span_since(&content_cursor);
+
+        // Must end with ]]
+        if !matches!(inp.peek(), Some(Token::RBracket)) {
+            inp.rewind(before);
+            return Err(Rich::custom(
+                inp.span_since(&start_cursor),
+                "expected ]] for anchor",
+            ));
+        }
+        inp.skip();
+        if !matches!(inp.peek(), Some(Token::RBracket)) {
+            inp.rewind(before);
+            return Err(Rich::custom(
+                inp.span_since(&start_cursor),
+                "expected ]] for anchor",
+            ));
+        }
+        inp.skip();
+
+        // Must be at end of line
+        if inp.peek().is_some() && !matches!(inp.peek(), Some(Token::Newline)) {
+            inp.rewind(before);
+            return Err(Rich::custom(
+                inp.span_since(&start_cursor),
+                "anchor must be at end of line",
+            ));
+        }
+        if matches!(inp.peek(), Some(Token::Newline)) {
+            inp.skip();
+        }
+
+        let content = &source[content_span.start..content_span.end];
+
+        // Split on comma: [[id]] or [[id,reftext]]
+        let mut meta = PendingMetadata::default();
+        if let Some(comma_pos) = content.find(',') {
+            let id = &content[..comma_pos];
+            if !is_valid_anchor_id(id) {
+                inp.rewind(before);
+                return Err(Rich::custom(
+                    inp.span_since(&start_cursor),
+                    "invalid anchor ID",
+                ));
+            }
+            meta.id = Some(id);
+            let reftext_start = content_span.start + comma_pos + 1;
+            let reftext_end = content_span.end;
+            if reftext_start < reftext_end {
+                meta.reftext_span = Some(SourceSpan {
+                    start: reftext_start,
+                    end: reftext_end,
+                });
+            }
+        } else {
+            if !is_valid_anchor_id(content) {
+                inp.rewind(before);
+                return Err(Rich::custom(
+                    inp.span_since(&start_cursor),
+                    "invalid anchor ID",
+                ));
+            }
+            meta.id = Some(content);
+        }
+
+        Ok(meta)
+    })
 }
 
 /// Parse a block title line (`.Title`).
@@ -546,7 +682,10 @@ where
     verbatim_block(Token::Plus, 4, "pass", source, idx)
 }
 
-/// Parse a fenced code block (`` ``` ``).
+/// Parse a fenced code block (`` ``` `` or `` ```lang ``).
+///
+/// Captures optional language text after the opening backticks.
+#[allow(clippy::too_many_lines)]
 fn fenced_code_block<'tokens, 'src: 'tokens, I>(
     source: &'src str,
     idx: &'tokens SourceIndex,
@@ -554,7 +693,128 @@ fn fenced_code_block<'tokens, 'src: 'tokens, I>(
 where
     I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
 {
-    verbatim_block(Token::Backtick, 3, "listing", source, idx)
+    custom(move |inp| {
+        let before = inp.save();
+        let start_cursor = inp.cursor();
+
+        // Count opening backticks (need 3+)
+        let mut open_count = 0;
+        while matches!(inp.peek(), Some(Token::Backtick)) {
+            inp.skip();
+            open_count += 1;
+        }
+
+        if open_count < 3 {
+            inp.rewind(before);
+            return Err(Rich::custom(
+                inp.span_since(&start_cursor),
+                "not enough backticks for fenced code",
+            ));
+        }
+
+        let delimiter_span: SourceSpan = inp.span_since(&start_cursor);
+
+        // Capture optional language text (everything until newline)
+        let lang_cursor = inp.cursor();
+        while inp.peek().is_some() && !matches!(inp.peek(), Some(Token::Newline)) {
+            inp.skip();
+        }
+        let lang_span: SourceSpan = inp.span_since(&lang_cursor);
+        let language = if lang_span.start < lang_span.end {
+            let lang_text = &source[lang_span.start..lang_span.end].trim();
+            if lang_text.is_empty() {
+                None
+            } else {
+                Some(*lang_text)
+            }
+        } else {
+            None
+        };
+
+        // Must be followed by newline
+        if !matches!(inp.peek(), Some(Token::Newline)) {
+            inp.rewind(before);
+            return Err(Rich::custom(
+                inp.span_since(&start_cursor),
+                "expected newline after fenced code opener",
+            ));
+        }
+        inp.skip(); // consume newline
+
+        // Capture content start
+        let content_cursor = inp.cursor();
+        let content_start_span: SourceSpan = inp.span_since(&content_cursor);
+        let content_start = content_start_span.start;
+
+        // Scan for matching closing delimiter
+        let mut at_line_start = true;
+        loop {
+            match inp.peek() {
+                None => {
+                    inp.rewind(before);
+                    return Err(Rich::custom(
+                        inp.span_since(&start_cursor),
+                        "unclosed fenced code block",
+                    ));
+                }
+                Some(Token::Newline) => {
+                    inp.skip();
+                    at_line_start = true;
+                }
+                Some(Token::Backtick) if at_line_start => {
+                    let close_cursor = inp.cursor();
+                    let close_start_span: SourceSpan = inp.span_since(&close_cursor);
+                    let content_end = close_start_span.start;
+
+                    let mut close_count = 0;
+                    while matches!(inp.peek(), Some(Token::Backtick)) {
+                        inp.skip();
+                        close_count += 1;
+                    }
+
+                    if close_count == open_count
+                        && (inp.peek().is_none() || matches!(inp.peek(), Some(Token::Newline)))
+                    {
+                        let block_end_span: SourceSpan = inp.span_since(&start_cursor);
+                        if matches!(inp.peek(), Some(Token::Newline)) {
+                            inp.skip();
+                        }
+
+                        let delimiter = &source[delimiter_span.start..delimiter_span.end];
+                        let actual_content_end = if content_end > content_start {
+                            content_end - 1
+                        } else {
+                            content_end
+                        };
+
+                        let mut block = RawBlock::new("listing");
+                        block.form = Some("delimited");
+                        block.delimiter = Some(delimiter);
+                        if content_start < actual_content_end {
+                            block.content_span = Some(SourceSpan {
+                                start: content_start,
+                                end: actual_content_end,
+                            });
+                        }
+                        block.location = Some(idx.location(&block_end_span));
+
+                        // Store language as a positional for transform to pick up
+                        if let Some(lang) = language {
+                            block.positionals = vec!["", lang];
+                        }
+
+                        return Ok(block);
+                    }
+
+                    at_line_start = false;
+                }
+                _ => {
+                    inp.skip();
+                    at_line_start = false;
+                }
+            }
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -867,6 +1127,7 @@ where
 ///
 /// The section captures both the title and the body content (everything until
 /// a same-or-higher-level heading or end of input).
+#[allow(clippy::too_many_lines)]
 fn section_heading<'tokens, 'src: 'tokens, I>(
     source: &'src str,
     idx: &'tokens SourceIndex,
@@ -908,10 +1169,10 @@ where
         while inp.peek().is_some() && !matches!(inp.peek(), Some(Token::Newline)) {
             inp.skip();
         }
-        let title_span: SourceSpan = inp.span_since(&title_cursor);
+        let raw_title_span: SourceSpan = inp.span_since(&title_cursor);
 
         // Title must have content
-        if title_span.start >= title_span.end {
+        if raw_title_span.start >= raw_title_span.end {
             inp.rewind(before);
             return Err(Rich::custom(
                 inp.span_since(&start_cursor),
@@ -928,6 +1189,60 @@ where
         }
 
         let level = eq_count - 1;
+
+        // Post-process title to extract embedded anchors and strip trailing symmetric markers
+        let raw_title = &source[raw_title_span.start..raw_title_span.end];
+        let mut title_end_offset = raw_title.len();
+        let mut embedded_id: Option<&'src str> = None;
+        let mut embedded_reftext_span: Option<SourceSpan> = None;
+
+        // Strip trailing symmetric `==` marker (e.g., ` ==` at end)
+        {
+            let trimmed = raw_title[..title_end_offset].trim_end();
+            let eq_marker: String = " ".to_string() + &"=".repeat(eq_count);
+            if trimmed.ends_with(&eq_marker) {
+                title_end_offset = trimmed.len() - eq_marker.len();
+            }
+        }
+
+        // Check for embedded anchor `[[id]]` or `[[id,reftext]]` before the trailing marker
+        {
+            let segment = raw_title[..title_end_offset].trim_end();
+            if let Some(anchor_start) = segment.rfind("[[")
+                && let Some(anchor_end) = segment[anchor_start..].find("]]")
+            {
+                let anchor_inner = &segment[anchor_start + 2..anchor_start + anchor_end];
+                let (id_part, reftext_part) = if let Some(comma) = anchor_inner.find(',') {
+                    (&anchor_inner[..comma], Some(&anchor_inner[comma + 1..]))
+                } else {
+                    (anchor_inner, None)
+                };
+
+                if !id_part.is_empty() && is_valid_anchor_id(id_part) {
+                    embedded_id = Some(
+                        &source[raw_title_span.start + anchor_start + 2
+                            ..raw_title_span.start + anchor_start + 2 + id_part.len()],
+                    );
+
+                    if let Some(reftext) = reftext_part {
+                        let reftext_start =
+                            raw_title_span.start + anchor_start + 2 + id_part.len() + 1;
+                        embedded_reftext_span = Some(SourceSpan {
+                            start: reftext_start,
+                            end: reftext_start + reftext.len(),
+                        });
+                    }
+
+                    let before_anchor = segment[..anchor_start].trim_end();
+                    title_end_offset = before_anchor.len();
+                }
+            }
+        }
+
+        let title_span = SourceSpan {
+            start: raw_title_span.start,
+            end: raw_title_span.start + title_end_offset,
+        };
 
         // Capture body content: everything until next same-or-higher-level heading or EOF
         let body_cursor = inp.cursor();
@@ -987,7 +1302,163 @@ where
             actual_body_end -= 1;
         }
 
-        let block_span: SourceSpan = inp.span_since(&start_cursor);
+        let mut block = RawBlock::new("section");
+        block.level = Some(level);
+        block.title_span = Some(title_span);
+        block.heading_line_location = Some(idx.location(&heading_line_span));
+        if let Some(eid) = embedded_id {
+            block.id = Some(eid);
+        }
+        if let Some(refspan) = embedded_reftext_span {
+            block.reftext_span = Some(refspan);
+        }
+        if body_start < actual_body_end {
+            block.content_span = Some(SourceSpan {
+                start: body_start,
+                end: actual_body_end,
+            });
+            // Section location spans from heading to end of last body content
+            let block_span: SourceSpan = SourceSpan {
+                start: heading_line_span.start,
+                end: actual_body_end,
+            };
+            block.location = Some(idx.location(&block_span));
+        } else {
+            // No body content — section location is just the heading line
+            block.location = Some(idx.location(&heading_line_span));
+        }
+
+        Ok(block)
+    })
+}
+
+/// Parse a Markdown-style section heading (`## Title`, `### Title`, etc.).
+///
+/// Maps `##` to level 1, `###` to level 2, etc. (same as `==`/`===`).
+/// Produces the same `RawBlock` as `section_heading`.
+#[allow(clippy::too_many_lines)]
+fn markdown_heading<'tokens, 'src: 'tokens, I>(
+    source: &'src str,
+    idx: &'tokens SourceIndex,
+) -> impl Parser<'tokens, I, RawBlock<'src>, BlockExtra<'tokens, 'src>> + Clone
+where
+    I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
+{
+    custom(move |inp| {
+        let before = inp.save();
+        let start_cursor = inp.cursor();
+
+        // Count leading `#` tokens (need at least 2 for level 1)
+        let mut hash_count = 0;
+        while matches!(inp.peek(), Some(Token::Hash)) {
+            inp.skip();
+            hash_count += 1;
+        }
+
+        if hash_count < 2 {
+            inp.rewind(before);
+            return Err(Rich::custom(
+                inp.span_since(&start_cursor),
+                "need at least 2 hash signs for markdown heading",
+            ));
+        }
+
+        // Must be followed by whitespace
+        if !matches!(inp.peek(), Some(Token::Whitespace)) {
+            inp.rewind(before);
+            return Err(Rich::custom(
+                inp.span_since(&start_cursor),
+                "expected whitespace after markdown heading marker",
+            ));
+        }
+        inp.skip(); // consume whitespace
+
+        // Capture title content (everything until newline)
+        let title_cursor = inp.cursor();
+        while inp.peek().is_some() && !matches!(inp.peek(), Some(Token::Newline)) {
+            inp.skip();
+        }
+        let title_span: SourceSpan = inp.span_since(&title_cursor);
+
+        if title_span.start >= title_span.end {
+            inp.rewind(before);
+            return Err(Rich::custom(
+                inp.span_since(&start_cursor),
+                "markdown heading title cannot be empty",
+            ));
+        }
+
+        let heading_line_span: SourceSpan = inp.span_since(&start_cursor);
+
+        if matches!(inp.peek(), Some(Token::Newline)) {
+            inp.skip();
+        }
+
+        let level = hash_count - 1; // ## = level 1, ### = level 2, etc.
+
+        // Capture body content (same logic as section_heading)
+        let body_cursor = inp.cursor();
+        let body_start_span: SourceSpan = inp.span_since(&body_cursor);
+        let body_start = body_start_span.start;
+
+        let mut at_line_start = true;
+        loop {
+            match inp.peek() {
+                None => break,
+                Some(Token::Newline) => {
+                    inp.skip();
+                    at_line_start = true;
+                }
+                // Check for AsciiDoc section heading (==)
+                Some(Token::Eq) if at_line_start => {
+                    let check_before = inp.save();
+                    let mut count = 0;
+                    while matches!(inp.peek(), Some(Token::Eq)) {
+                        inp.skip();
+                        count += 1;
+                    }
+                    if count >= 2 && matches!(inp.peek(), Some(Token::Whitespace)) {
+                        let check_level = count - 1;
+                        if check_level <= level {
+                            inp.rewind(check_before);
+                            break;
+                        }
+                    }
+                    at_line_start = false;
+                }
+                // Check for Markdown heading (##)
+                Some(Token::Hash) if at_line_start => {
+                    let check_before = inp.save();
+                    let mut count = 0;
+                    while matches!(inp.peek(), Some(Token::Hash)) {
+                        inp.skip();
+                        count += 1;
+                    }
+                    if count >= 2 && matches!(inp.peek(), Some(Token::Whitespace)) {
+                        let check_level = count - 1;
+                        if check_level <= level {
+                            inp.rewind(check_before);
+                            break;
+                        }
+                    }
+                    at_line_start = false;
+                }
+                _ => {
+                    inp.skip();
+                    at_line_start = false;
+                }
+            }
+        }
+
+        let body_end_span: SourceSpan = inp.span_since(&body_cursor);
+        let body_end = body_end_span.end;
+
+        let mut actual_body_end = body_end;
+        while actual_body_end > body_start
+            && source.as_bytes().get(actual_body_end - 1) == Some(&b'\n')
+        {
+            actual_body_end -= 1;
+        }
 
         let mut block = RawBlock::new("section");
         block.level = Some(level);
@@ -998,10 +1469,500 @@ where
                 start: body_start,
                 end: actual_body_end,
             });
+            let block_span = SourceSpan {
+                start: heading_line_span.start,
+                end: actual_body_end,
+            };
+            block.location = Some(idx.location(&block_span));
+        } else {
+            block.location = Some(idx.location(&heading_line_span));
         }
+
+        Ok(block)
+    })
+}
+
+/// Parse a setext-style section heading (title followed by underline of 10+ hyphens).
+///
+/// Produces a level-1 section.
+#[allow(clippy::too_many_lines)]
+fn setext_heading<'tokens, 'src: 'tokens, I>(
+    source: &'src str,
+    idx: &'tokens SourceIndex,
+) -> impl Parser<'tokens, I, RawBlock<'src>, BlockExtra<'tokens, 'src>> + Clone
+where
+    I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
+{
+    custom(move |inp| {
+        let before = inp.save();
+        let start_cursor = inp.cursor();
+
+        // First line: title content (must not be empty, must not start with special tokens)
+        // Skip if starts with a block-forming token
+        match inp.peek() {
+            None
+            | Some(
+                Token::Newline
+                | Token::Eq
+                | Token::Hash
+                | Token::Star
+                | Token::Dot
+                | Token::Hyphen
+                | Token::LBracket
+                | Token::Slash
+                | Token::Plus
+                | Token::Underscore
+                | Token::Backtick,
+            ) => {
+                inp.rewind(before);
+                return Err(Rich::custom(
+                    inp.span_since(&start_cursor),
+                    "setext heading cannot start with block-forming token",
+                ));
+            }
+            _ => {}
+        }
+
+        // Consume title line
+        let title_cursor = inp.cursor();
+        while inp.peek().is_some() && !matches!(inp.peek(), Some(Token::Newline)) {
+            inp.skip();
+        }
+        let title_span: SourceSpan = inp.span_since(&title_cursor);
+
+        if title_span.start >= title_span.end {
+            inp.rewind(before);
+            return Err(Rich::custom(
+                inp.span_since(&start_cursor),
+                "setext heading title cannot be empty",
+            ));
+        }
+
+        // Must have newline after title
+        if !matches!(inp.peek(), Some(Token::Newline)) {
+            inp.rewind(before);
+            return Err(Rich::custom(
+                inp.span_since(&start_cursor),
+                "expected newline after setext title",
+            ));
+        }
+        inp.skip(); // consume newline
+
+        // Second line: 10+ hyphens followed by newline or EOF
+        let underline_cursor = inp.cursor();
+        let mut hyphen_count = 0;
+        while matches!(inp.peek(), Some(Token::Hyphen)) {
+            inp.skip();
+            hyphen_count += 1;
+        }
+
+        if hyphen_count < 10
+            || (inp.peek().is_some() && !matches!(inp.peek(), Some(Token::Newline)))
+        {
+            inp.rewind(before);
+            return Err(Rich::custom(
+                inp.span_since(&start_cursor),
+                "setext underline needs 10+ hyphens",
+            ));
+        }
+
+        let underline_span: SourceSpan = inp.span_since(&underline_cursor);
+
+        // Consume trailing newline
+        if matches!(inp.peek(), Some(Token::Newline)) {
+            inp.skip();
+        }
+
+        // Heading line spans from title start to end of underline
+        let heading_span = SourceSpan {
+            start: title_span.start,
+            end: underline_span.end,
+        };
+
+        // Capture body content (same as section_heading, level 1)
+        let level = 1;
+        let body_cursor = inp.cursor();
+        let body_start_span: SourceSpan = inp.span_since(&body_cursor);
+        let body_start = body_start_span.start;
+
+        let mut at_line_start = true;
+        loop {
+            match inp.peek() {
+                None => break,
+                Some(Token::Newline) => {
+                    inp.skip();
+                    at_line_start = true;
+                }
+                Some(Token::Eq) if at_line_start => {
+                    let check_before = inp.save();
+                    let mut count = 0;
+                    while matches!(inp.peek(), Some(Token::Eq)) {
+                        inp.skip();
+                        count += 1;
+                    }
+                    if count >= 2 && matches!(inp.peek(), Some(Token::Whitespace)) {
+                        let check_level = count - 1;
+                        if check_level <= level {
+                            inp.rewind(check_before);
+                            break;
+                        }
+                    }
+                    at_line_start = false;
+                }
+                _ => {
+                    inp.skip();
+                    at_line_start = false;
+                }
+            }
+        }
+
+        let body_end_span: SourceSpan = inp.span_since(&body_cursor);
+        let body_end = body_end_span.end;
+
+        let mut actual_body_end = body_end;
+        while actual_body_end > body_start
+            && source.as_bytes().get(actual_body_end - 1) == Some(&b'\n')
+        {
+            actual_body_end -= 1;
+        }
+
+        let mut block = RawBlock::new("section");
+        block.level = Some(level);
+        block.title_span = Some(title_span);
+        block.heading_line_location = Some(idx.location(&heading_span));
+        if body_start < actual_body_end {
+            block.content_span = Some(SourceSpan {
+                start: body_start,
+                end: actual_body_end,
+            });
+            let block_span = SourceSpan {
+                start: heading_span.start,
+                end: actual_body_end,
+            };
+            block.location = Some(idx.location(&block_span));
+        } else {
+            block.location = Some(idx.location(&heading_span));
+        }
+
+        Ok(block)
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Block Macro Parsers
+// ---------------------------------------------------------------------------
+
+/// Parse an `image::target[attrlist]` block macro.
+///
+/// Produces a `RawBlock` with `name="image"`, `form="macro"`, `target="path"`.
+fn image_block_macro<'tokens, 'src: 'tokens, I>(
+    source: &'src str,
+    idx: &'tokens SourceIndex,
+) -> impl Parser<'tokens, I, RawBlock<'src>, BlockExtra<'tokens, 'src>> + Clone
+where
+    I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
+{
+    custom(move |inp| {
+        let before = inp.save();
+        let start_cursor = inp.cursor();
+
+        // Match "image" text
+        if let Some(Token::Text("image")) = inp.peek() {
+            inp.skip();
+        } else {
+            inp.rewind(before);
+            return Err(Rich::custom(
+                inp.span_since(&start_cursor),
+                "expected 'image'",
+            ));
+        }
+
+        // Match `::`
+        if !matches!(inp.peek(), Some(Token::Colon)) {
+            inp.rewind(before);
+            return Err(Rich::custom(
+                inp.span_since(&start_cursor),
+                "expected ':' after 'image'",
+            ));
+        }
+        inp.skip();
+        if !matches!(inp.peek(), Some(Token::Colon)) {
+            inp.rewind(before);
+            return Err(Rich::custom(
+                inp.span_since(&start_cursor),
+                "expected '::' after 'image'",
+            ));
+        }
+        inp.skip();
+
+        // Capture target (everything until `[`)
+        let target_cursor = inp.cursor();
+        while inp.peek().is_some() && !matches!(inp.peek(), Some(Token::LBracket | Token::Newline))
+        {
+            inp.skip();
+        }
+        let target_span: SourceSpan = inp.span_since(&target_cursor);
+
+        if target_span.start >= target_span.end {
+            inp.rewind(before);
+            return Err(Rich::custom(
+                inp.span_since(&start_cursor),
+                "image macro target cannot be empty",
+            ));
+        }
+
+        // Match `[`
+        if !matches!(inp.peek(), Some(Token::LBracket)) {
+            inp.rewind(before);
+            return Err(Rich::custom(
+                inp.span_since(&start_cursor),
+                "expected '[' after image target",
+            ));
+        }
+        inp.skip();
+
+        // Consume attrlist until `]` (we ignore the content for now)
+        while inp.peek().is_some() && !matches!(inp.peek(), Some(Token::RBracket | Token::Newline))
+        {
+            inp.skip();
+        }
+
+        // Match `]`
+        if !matches!(inp.peek(), Some(Token::RBracket)) {
+            inp.rewind(before);
+            return Err(Rich::custom(
+                inp.span_since(&start_cursor),
+                "expected ']' to close image macro",
+            ));
+        }
+        inp.skip();
+
+        let block_span: SourceSpan = inp.span_since(&start_cursor);
+
+        // Consume trailing newline
+        if matches!(inp.peek(), Some(Token::Newline)) {
+            inp.skip();
+        }
+
+        let target = &source[target_span.start..target_span.end];
+        let mut block = RawBlock::new("image");
+        block.form = Some("macro");
+        block.target = Some(target);
         block.location = Some(idx.location(&block_span));
 
         Ok(block)
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Description List Parser
+// ---------------------------------------------------------------------------
+
+/// Parse a description list (`term:: description`).
+///
+/// Collects consecutive description list items into a `dlist` block.
+/// Each item has a term (before `::`) and optional principal (after `:: `),
+/// or block content via list continuation (`+`).
+#[allow(clippy::too_many_lines)]
+fn description_list<'tokens, 'src: 'tokens, I>(
+    source: &'src str,
+    idx: &'tokens SourceIndex,
+) -> impl Parser<'tokens, I, RawBlock<'src>, BlockExtra<'tokens, 'src>> + Clone
+where
+    I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
+{
+    custom(move |inp| {
+        let before = inp.save();
+        let start_cursor = inp.cursor();
+
+        let mut items: Vec<RawBlock<'src>> = Vec::new();
+
+        loop {
+            let item_cursor = inp.cursor();
+
+            // Scan for `::` pattern on this line: consume tokens until we find Colon+Colon
+            // followed by whitespace+content or newline (end of term)
+            let term_cursor = inp.cursor();
+            let mut found_marker = false;
+
+            loop {
+                match inp.peek() {
+                    None | Some(Token::Newline) => break,
+                    Some(Token::Colon) => {
+                        let colon_before = inp.save();
+                        inp.skip();
+                        if matches!(inp.peek(), Some(Token::Colon)) {
+                            inp.skip();
+                            // Check what follows: whitespace+content or newline/EOF
+                            if inp.peek().is_none()
+                                || matches!(inp.peek(), Some(Token::Newline | Token::Whitespace))
+                            {
+                                found_marker = true;
+                                break;
+                            }
+                            // Not a valid marker, continue
+                            // Already consumed two colons, keep going
+                        } else {
+                            // Single colon, not a marker
+                            inp.rewind(colon_before);
+                            inp.skip();
+                        }
+                    }
+                    _ => {
+                        inp.skip();
+                    }
+                }
+            }
+
+            if !found_marker {
+                if items.is_empty() {
+                    inp.rewind(before);
+                    return Err(Rich::custom(
+                        inp.span_since(&start_cursor),
+                        "not a description list",
+                    ));
+                }
+                // No more items, break the collection loop
+                break;
+            }
+
+            // We found `term::` — capture the term span (before the ::)
+            let term_span_raw: SourceSpan = inp.span_since(&term_cursor);
+            // The term span ends 2 bytes before current position (before the `::`)
+            let term_span = SourceSpan {
+                start: term_span_raw.start,
+                end: term_span_raw.end - 2, // exclude the `::`
+            };
+
+            // Check for principal content on same line
+            let mut principal_span: Option<SourceSpan> = None;
+            let mut content_span: Option<SourceSpan> = None;
+
+            if matches!(inp.peek(), Some(Token::Whitespace)) {
+                inp.skip(); // consume space after ::
+                let principal_cursor = inp.cursor();
+                while inp.peek().is_some() && !matches!(inp.peek(), Some(Token::Newline)) {
+                    inp.skip();
+                }
+                let ps: SourceSpan = inp.span_since(&principal_cursor);
+                if ps.start < ps.end {
+                    principal_span = Some(ps);
+                }
+            }
+
+            // Consume trailing newline
+            if matches!(inp.peek(), Some(Token::Newline)) {
+                inp.skip();
+            }
+
+            // Check for list continuation `+` on next line
+            if principal_span.is_none() {
+                let cont_before = inp.save();
+                if matches!(inp.peek(), Some(Token::Plus)) {
+                    inp.skip();
+                    if inp.peek().is_none() || matches!(inp.peek(), Some(Token::Newline)) {
+                        // Found list continuation
+                        if matches!(inp.peek(), Some(Token::Newline)) {
+                            inp.skip();
+                        }
+                        // Capture content span until blank line or EOF
+                        let cont_cursor = inp.cursor();
+                        let cont_start_span: SourceSpan = inp.span_since(&cont_cursor);
+                        let cont_start = cont_start_span.start;
+
+                        let mut at_line_start = true;
+                        loop {
+                            match inp.peek() {
+                                None => break,
+                                Some(Token::Newline) if at_line_start => break,
+                                Some(Token::Newline) => {
+                                    inp.skip();
+                                    at_line_start = true;
+                                }
+                                _ => {
+                                    inp.skip();
+                                    at_line_start = false;
+                                }
+                            }
+                        }
+
+                        let cont_end_span: SourceSpan = inp.span_since(&cont_cursor);
+                        let mut cont_end = cont_end_span.end;
+                        while cont_end > cont_start
+                            && source.as_bytes().get(cont_end - 1) == Some(&b'\n')
+                        {
+                            cont_end -= 1;
+                        }
+
+                        if cont_start < cont_end {
+                            content_span = Some(SourceSpan {
+                                start: cont_start,
+                                end: cont_end,
+                            });
+                        }
+
+                        // Consume the blank line
+                        if matches!(inp.peek(), Some(Token::Newline)) {
+                            inp.skip();
+                        }
+                    } else {
+                        inp.rewind(cont_before);
+                    }
+                }
+            }
+
+            let item_span: SourceSpan = inp.span_since(&item_cursor);
+            // Adjust item span to exclude trailing newline
+            let mut item_end = item_span.end;
+            while item_end > item_span.start && source.as_bytes().get(item_end - 1) == Some(&b'\n')
+            {
+                item_end -= 1;
+            }
+            let adjusted_item_span = SourceSpan {
+                start: item_span.start,
+                end: item_end,
+            };
+
+            let mut item = RawBlock::new("dlistItem");
+            item.marker = Some("::");
+            item.term_spans.push(term_span);
+            item.principal_span = principal_span;
+            item.content_span = content_span;
+            item.location = Some(idx.location(&adjusted_item_span));
+
+            items.push(item);
+
+            // Check if next line is another dlist item (peek ahead)
+            // If blank line or EOF, stop collecting
+            if inp.peek().is_none() || matches!(inp.peek(), Some(Token::Newline)) {
+                break;
+            }
+        }
+
+        if items.is_empty() {
+            inp.rewind(before);
+            return Err(Rich::custom(
+                inp.span_since(&start_cursor),
+                "not a description list",
+            ));
+        }
+
+        let list_span: SourceSpan = inp.span_since(&start_cursor);
+        let mut list_end = list_span.end;
+        while list_end > list_span.start && source.as_bytes().get(list_end - 1) == Some(&b'\n') {
+            list_end -= 1;
+        }
+        let adjusted_list_span = SourceSpan {
+            start: list_span.start,
+            end: list_end,
+        };
+
+        let mut dlist = RawBlock::new("dlist");
+        dlist.marker = Some("::");
+        dlist.items = Some(items);
+        dlist.location = Some(idx.location(&adjusted_list_span));
+
+        Ok(dlist)
     })
 }
 
@@ -1092,11 +2053,69 @@ where
 
     // Calculate item span BEFORE consuming trailing newline
     // (location should end at end of content, not include the newline)
-    let item_span: SourceSpan = inp.span_since(&start_cursor);
+    let mut item_span: SourceSpan = inp.span_since(&start_cursor);
 
     // Consume trailing newline if present
     if matches!(inp.peek(), Some(Token::Newline)) {
         inp.skip();
+    }
+
+    // Check for list continuation `+` on next line
+    let mut continuation_span: Option<SourceSpan> = None;
+    let before_cont = inp.save();
+    if matches!(inp.peek(), Some(Token::Plus)) {
+        inp.skip();
+        if matches!(inp.peek(), Some(Token::Newline)) {
+            // Found `+\n` — consume the newline and capture following block content
+            inp.skip();
+            let cont_start = inp.cursor();
+            // Capture everything until end of input or a line that starts with
+            // a list marker at our level or shallower (next sibling item).
+            let mut last_content_end: Option<SourceSpan> = None;
+            loop {
+                if inp.peek().is_none() {
+                    break;
+                }
+                // Check if this line starts a new list item at our level or shallower
+                let line_save = inp.save();
+                while matches!(inp.peek(), Some(Token::Whitespace)) {
+                    inp.skip();
+                }
+                let mc = peek_token_count(inp, marker_token);
+                if mc > 0 && mc <= expected_level {
+                    let check_save = inp.save();
+                    for _ in 0..mc {
+                        inp.skip();
+                    }
+                    let is_list_marker = matches!(inp.peek(), Some(Token::Whitespace));
+                    inp.rewind(check_save);
+                    if is_list_marker {
+                        inp.rewind(line_save);
+                        break;
+                    }
+                }
+                inp.rewind(line_save);
+
+                // Consume this line
+                while inp.peek().is_some() && !matches!(inp.peek(), Some(Token::Newline)) {
+                    inp.skip();
+                }
+                last_content_end = Some(inp.span_since(&cont_start));
+                if matches!(inp.peek(), Some(Token::Newline)) {
+                    inp.skip();
+                }
+            }
+            if let Some(span) = last_content_end {
+                continuation_span = Some(span);
+                // Update item_span to include continuation
+                item_span = SourceSpan {
+                    start: item_span.start,
+                    end: span.end,
+                };
+            }
+        } else {
+            inp.rewind(before_cont);
+        }
     }
 
     let mut item = RawBlock::new("listItem");
@@ -1104,6 +2123,7 @@ where
     if content_span.start < content_span.end {
         item.principal_span = Some(content_span);
     }
+    item.content_span = continuation_span;
     item.location = Some(idx.location(&item_span));
 
     Some(item)
@@ -1341,7 +2361,7 @@ where
     I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
 {
     match inp.peek() {
-        // End of input or block attribute line [...]
+        // End of input, block attribute line [...], or block anchor [[...]]
         None | Some(Token::LBracket) => true,
 
         // Section heading (== Title) - need 2+ equals followed by whitespace
@@ -1457,6 +2477,16 @@ where
                 count += 1;
             }
             count >= 3
+        }
+
+        // Markdown heading (## Title)
+        Some(Token::Hash) => {
+            let mut count = 0;
+            while matches!(inp.peek(), Some(Token::Hash)) {
+                inp.skip();
+                count += 1;
+            }
+            count >= 2 && matches!(inp.peek(), Some(Token::Whitespace))
         }
 
         _ => false,
@@ -1583,14 +2613,18 @@ where
         block_comment().to(ParseItem::Skip),
         line_comment().to(ParseItem::Skip),
         // Metadata (accumulate)
+        block_anchor_line(source).map(ParseItem::Metadata),
         block_attr_line(source).map(ParseItem::Metadata),
         block_title_line().map(ParseItem::Metadata),
         // Breaks
         thematic_break(idx).map(ParseItem::Block),
         page_break(idx).map(ParseItem::Block),
-        // Section headings
+        // Section headings (AsciiDoc, Markdown, and setext)
         section_heading(source, idx).map(ParseItem::Block),
+        markdown_heading(source, idx).map(ParseItem::Block),
+        setext_heading(source, idx).map(ParseItem::Block),
         // Lists (must come before paragraph)
+        description_list(source, idx).map(ParseItem::Block),
         unordered_list(source, idx).map(ParseItem::Block),
         ordered_list(source, idx).map(ParseItem::Block),
         // Verbatim blocks (must come before compound to avoid conflicts)
@@ -1603,6 +2637,8 @@ where
         sidebar_block(source, idx).map(ParseItem::Block),
         quote_block(source, idx).map(ParseItem::Block),
         open_block(source, idx).map(ParseItem::Block),
+        // Block macros
+        image_block_macro(source, idx).map(ParseItem::Block),
         // Fallback paragraph
         paragraph(idx).map(ParseItem::Block),
     ));
@@ -1677,6 +2713,10 @@ fn merge_metadata<'src>(
     // Merge collections
     base.roles.extend(overlay.roles);
     base.options.extend(overlay.options);
+    if !overlay.positionals.is_empty() {
+        base.positionals = overlay.positionals;
+    }
+    base.named_attributes.extend(overlay.named_attributes);
     base
 }
 

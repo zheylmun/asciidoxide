@@ -6,11 +6,47 @@
 //! 3. Parses title spans as inlines
 
 use super::raw_block::RawBlock;
+use std::borrow::Cow;
+use std::collections::HashMap;
+
 use crate::asg::{Block, BlockMetadata, InlineNode, Location, Position, TextNode};
 use crate::diagnostic::ParseDiagnostic;
 use crate::lexer::lex;
 use crate::parser::inline::run_inline_parser;
 use crate::span::{SourceIndex, SourceSpan};
+
+/// Generate a slug from a section title for auto-ID generation.
+///
+/// Algorithm: lowercase, non-alphanumeric → `_`, prefix with `_`, collapse
+/// consecutive underscores, trim trailing underscores.
+fn slugify(title: &str) -> String {
+    let mut slug = String::with_capacity(title.len() + 1);
+    slug.push('_');
+    for ch in title.chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+        } else {
+            slug.push('_');
+        }
+    }
+    // Collapse consecutive underscores
+    let mut collapsed = String::with_capacity(slug.len());
+    let mut prev_underscore = false;
+    for ch in slug.chars() {
+        if ch == '_' {
+            if !prev_underscore {
+                collapsed.push('_');
+            }
+            prev_underscore = true;
+        } else {
+            collapsed.push(ch);
+            prev_underscore = false;
+        }
+    }
+    // Trim trailing underscores
+    collapsed.truncate(collapsed.trim_end_matches('_').len());
+    collapsed
+}
 
 /// Offset a location by a base position.
 ///
@@ -119,35 +155,122 @@ fn get_base_position(_source: &str, idx: &SourceIndex, byte_offset: usize) -> Po
 /// The `source` is the original full source, and `idx` is its `SourceIndex`.
 ///
 /// Returns a vector because discrete sections expand into a heading plus sibling blocks.
+///
+/// An `id_registry` is threaded through for section ID deduplication.
 #[allow(clippy::too_many_lines)]
-pub(super) fn transform_raw_block<'src>(
+fn transform_raw_block_inner<'src>(
     raw: RawBlock<'src>,
     source: &'src str,
     idx: &SourceIndex,
+    id_registry: &mut HashMap<String, usize>,
 ) -> (Vec<Block<'src>>, Vec<ParseDiagnostic>) {
     // Handle discrete sections specially - they expand into heading + sibling blocks
     if raw.name == "section" && raw.style == Some("discrete") {
-        return transform_discrete_section(raw, source, idx);
+        return transform_discrete_section(raw, source, idx, id_registry);
     }
 
     let mut diagnostics = Vec::new();
 
-    let mut block = Block::new(raw.name);
+    // --- Style promotion ---
+    // Apply style-based name changes and extract language attribute
+    let mut promoted_name: &str = raw.name;
+    let mut language: Option<&'src str> = None;
+    let style = raw.style;
+    let positionals = &raw.positionals;
+
+    match (style, raw.name) {
+        // [source] on literal block → listing
+        (Some("source"), "literal") => {
+            promoted_name = "listing";
+            // Second positional is language
+            if positionals.len() > 1 && !positionals[1].is_empty() {
+                language = Some(positionals[1]);
+            }
+        }
+        // [source] or [source,lang] on listing → listing (stays same) + language
+        (Some("source"), "listing") => {
+            if positionals.len() > 1 && !positionals[1].is_empty() {
+                language = Some(positionals[1]);
+            }
+        }
+        // [,lang] on listing - empty first positional implies source promotion
+        (None, "listing")
+            if positionals.len() > 1 && !positionals.is_empty() && positionals[0].is_empty() =>
+        {
+            if !positionals[1].is_empty() {
+                language = Some(positionals[1]);
+            }
+        }
+        // [stem] on pass → stem
+        (Some("stem"), "pass") => {
+            promoted_name = "stem";
+        }
+        // [verse] on quote → verse
+        (Some("verse"), "quote") => {
+            promoted_name = "verse";
+        }
+        _ => {}
+    }
+
+    // For fenced code blocks (listing with backtick delimiter), extract language from positionals
+    if raw.name == "listing"
+        && raw.delimiter.is_some_and(|d| d.starts_with('`'))
+        && positionals.len() > 1
+        && !positionals[1].is_empty()
+    {
+        language = Some(positionals[1]);
+    }
+
+    // For quote/verse blocks, extract attribution (2nd pos) and citetitle (3rd pos)
+    let mut attribution: Option<&'src str> = None;
+    let mut citetitle: Option<&'src str> = None;
+    if matches!(promoted_name, "quote" | "verse") {
+        if positionals.len() > 1 && !positionals[1].is_empty() {
+            attribution = Some(positionals[1].trim());
+        }
+        if positionals.len() > 2 && !positionals[2].is_empty() {
+            citetitle = Some(positionals[2].trim());
+        }
+    }
+
+    // Style is consumed (not emitted in output) for promotion styles
+    let emit_style = match style {
+        Some("source" | "listing" | "stem" | "verse" | "quote") => None,
+        other => other,
+    };
+
+    let mut block = Block::new(promoted_name);
     block.form = raw.form;
     block.delimiter = raw.delimiter;
-    block.id = raw.id;
-    block.style = raw.style;
+    block.id = raw.id.map(Cow::Borrowed);
+    block.style = emit_style;
+    block.target = raw.target;
     block.level = raw.level;
     block.variant = raw.variant;
     block.marker = raw.marker;
     block.location = raw.location;
 
-    // Build metadata if we have roles or options
-    if !raw.roles.is_empty() || !raw.options.is_empty() {
+    // Build metadata if we have roles, options, named attributes, or language
+    // Filter out consumed attributes (caption, id, style are not emitted)
+    let mut meta_attributes: std::collections::HashMap<&str, &str> = raw
+        .named_attributes
+        .into_iter()
+        .filter(|(k, _)| !matches!(*k, "caption" | "id" | "style"))
+        .collect();
+    if let Some(lang) = language {
+        meta_attributes.insert("language", lang);
+    }
+    if let Some(attr) = attribution {
+        meta_attributes.insert("attribution", attr);
+    }
+    if let Some(cite) = citetitle {
+        meta_attributes.insert("citetitle", cite);
+    }
+    if !raw.roles.is_empty() || !raw.options.is_empty() || !meta_attributes.is_empty() {
         block.metadata = Some(BlockMetadata {
             roles: raw.roles,
             options: raw.options,
-            attributes: std::collections::HashMap::new(),
+            attributes: meta_attributes,
         });
     }
 
@@ -184,18 +307,48 @@ pub(super) fn transform_raw_block<'src>(
         block.reftext = Some(reftext_inlines);
     }
 
-    // Handle content based on block type
-    match raw.name {
+    // Auto-generate section IDs when no explicit ID is set and no style is applied
+    if promoted_name == "section"
+        && block.id.is_none()
+        && style.is_none()
+        && let Some(title_span) = raw.title_span
+    {
+        let title_text = &source[title_span.start..title_span.end];
+        let slug = slugify(title_text);
+        let count = id_registry.entry(slug.clone()).or_insert(0);
+        *count += 1;
+        if *count == 1 {
+            block.id = Some(Cow::Owned(slug));
+        } else {
+            block.id = Some(Cow::Owned(format!("{slug}_{count}")));
+        }
+    }
+
+    // Handle content based on block type (using promoted name)
+    match promoted_name {
         // Verbatim blocks: content stays as raw text (with proper location)
-        "listing" | "literal" | "pass" => {
+        // Leading and trailing blank lines are stripped.
+        "listing" | "literal" | "pass" | "stem" => {
             if let Some(content_span) = raw.content_span {
                 let content = &source[content_span.start..content_span.end];
-                // Use the original idx to get the correct location
-                let location = idx.location(&content_span);
-                block.inlines = Some(vec![InlineNode::Text(TextNode {
-                    value: content,
-                    location: Some(location),
-                })]);
+                // Strip leading and trailing blank lines
+                let trimmed = content.trim_matches('\n');
+                if trimmed.is_empty() {
+                    block.inlines = Some(vec![]);
+                } else {
+                    let leading_stripped = content.len() - content.trim_start_matches('\n').len();
+                    let trimmed_start = content_span.start + leading_stripped;
+                    let trimmed_end = trimmed_start + trimmed.len();
+                    let trimmed_span = SourceSpan {
+                        start: trimmed_start,
+                        end: trimmed_end,
+                    };
+                    let location = idx.location(&trimmed_span);
+                    block.inlines = Some(vec![InlineNode::Text(TextNode {
+                        value: trimmed,
+                        location: Some(location),
+                    })]);
+                }
             } else {
                 block.inlines = Some(vec![]);
             }
@@ -222,6 +375,20 @@ pub(super) fn transform_raw_block<'src>(
             }
         }
 
+        // Verse blocks: content preserved as raw text with newlines
+        "verse" => {
+            if let Some(content_span) = raw.content_span {
+                let content = &source[content_span.start..content_span.end];
+                let location = idx.location(&content_span);
+                block.inlines = Some(vec![InlineNode::Text(TextNode {
+                    value: content,
+                    location: Some(location),
+                })]);
+            } else {
+                block.inlines = Some(vec![]);
+            }
+        }
+
         // Compound blocks: recursively parse content as blocks
         "example" | "sidebar" | "quote" | "open" => {
             if let Some(content_span) = raw.content_span {
@@ -237,7 +404,7 @@ pub(super) fn transform_raw_block<'src>(
                 let mut child_blocks = Vec::new();
                 for raw_child in raw_blocks {
                     let (mut children, child_diags) =
-                        transform_raw_block(raw_child, content, &content_idx);
+                        transform_raw_block_inner(raw_child, content, &content_idx, id_registry);
                     diagnostics.extend(child_diags);
                     // Adjust all locations in the child block tree
                     for child in &mut children {
@@ -266,7 +433,7 @@ pub(super) fn transform_raw_block<'src>(
                 let mut child_blocks = Vec::new();
                 for raw_child in raw_blocks {
                     let (mut children, child_diags) =
-                        transform_raw_block(raw_child, content, &content_idx);
+                        transform_raw_block_inner(raw_child, content, &content_idx, id_registry);
                     diagnostics.extend(child_diags);
                     for child in &mut children {
                         offset_block_locations(child, base);
@@ -280,11 +447,12 @@ pub(super) fn transform_raw_block<'src>(
         }
 
         // Lists: items need to be transformed (list items don't expand to multiple blocks)
-        "list" => {
+        "list" | "dlist" => {
             if let Some(items) = raw.items {
                 let mut transformed_items = Vec::new();
                 for item in items {
-                    let (transformed, item_diags) = transform_raw_block(item, source, idx);
+                    let (transformed, item_diags) =
+                        transform_raw_block_inner(item, source, idx, id_registry);
                     diagnostics.extend(item_diags);
                     // List items always produce exactly one block
                     transformed_items.extend(transformed);
@@ -294,7 +462,7 @@ pub(super) fn transform_raw_block<'src>(
         }
 
         // List items: parse principal span as inlines
-        "listItem" => {
+        "listItem" | "dlistItem" => {
             if let Some(principal_span) = raw.principal_span {
                 let content = &source[principal_span.start..principal_span.end];
                 let content_tokens = lex(content);
@@ -303,7 +471,6 @@ pub(super) fn transform_raw_block<'src>(
                     run_inline_parser(&content_tokens, content, &content_idx);
                 diagnostics.extend(principal_diags);
 
-                // Adjust locations
                 let base = get_base_position(source, idx, principal_span.start);
                 for inline in &mut principal {
                     offset_inline_location(inline, base);
@@ -311,21 +478,68 @@ pub(super) fn transform_raw_block<'src>(
                 block.principal = Some(principal);
             }
 
-            // Transform nested blocks (nested lists)
+            // Parse term spans as inlines (for description list items)
+            if !raw.term_spans.is_empty() {
+                let mut terms = Vec::new();
+                for term_span in &raw.term_spans {
+                    let content = &source[term_span.start..term_span.end];
+                    let content_tokens = lex(content);
+                    let content_idx = SourceIndex::new(content);
+                    let (mut term_inlines, term_diags) =
+                        run_inline_parser(&content_tokens, content, &content_idx);
+                    diagnostics.extend(term_diags);
+
+                    let base = get_base_position(source, idx, term_span.start);
+                    for inline in &mut term_inlines {
+                        offset_inline_location(inline, base);
+                    }
+                    terms.push(term_inlines);
+                }
+                block.terms = Some(terms);
+            }
+
+            // Parse continuation content as blocks (for list continuation `+`)
+            if let Some(content_span) = raw.content_span {
+                let content = &source[content_span.start..content_span.end];
+                let content_tokens = lex(content);
+                let content_idx = SourceIndex::new(content);
+                let (raw_blocks, block_diags) =
+                    super::boundary::parse_raw_blocks(&content_tokens, content, &content_idx);
+                diagnostics.extend(block_diags);
+
+                let base = get_base_position(source, idx, content_span.start);
+                let mut child_blocks = Vec::new();
+                for raw_child in raw_blocks {
+                    let (mut children, child_diags) =
+                        transform_raw_block_inner(raw_child, content, &content_idx, id_registry);
+                    diagnostics.extend(child_diags);
+                    for child in &mut children {
+                        offset_block_locations(child, base);
+                    }
+                    child_blocks.extend(children);
+                }
+                block.blocks = Some(child_blocks);
+            }
+
+            // Transform nested blocks (nested lists from boundary parser)
             if let Some(nested_blocks) = raw.blocks {
                 let mut transformed_nested = Vec::new();
                 for nested in nested_blocks {
-                    let (transformed, nested_diags) = transform_raw_block(nested, source, idx);
+                    let (transformed, nested_diags) =
+                        transform_raw_block_inner(nested, source, idx, id_registry);
                     diagnostics.extend(nested_diags);
                     transformed_nested.extend(transformed);
                 }
-                block.blocks = Some(transformed_nested);
+                if let Some(existing) = &mut block.blocks {
+                    existing.extend(transformed_nested);
+                } else {
+                    block.blocks = Some(transformed_nested);
+                }
             }
         }
 
-        // Breaks and headings: no content to transform
-        // (Headings are standalone with no body, from [discrete] style)
-        "break" | "heading" => {}
+        // Breaks, headings, and block macros: no content to transform
+        "break" | "heading" | "image" => {}
 
         // Default: try to parse content_span as inlines if present
         _ => {
@@ -357,6 +571,7 @@ fn transform_discrete_section<'src>(
     raw: RawBlock<'src>,
     source: &'src str,
     idx: &SourceIndex,
+    id_registry: &mut HashMap<String, usize>,
 ) -> (Vec<Block<'src>>, Vec<ParseDiagnostic>) {
     let mut diagnostics = Vec::new();
     let mut result_blocks = Vec::new();
@@ -364,7 +579,7 @@ fn transform_discrete_section<'src>(
     // Create the heading block
     let mut heading = Block::new("heading");
     heading.level = raw.level;
-    heading.id = raw.id;
+    heading.id = raw.id.map(Cow::Borrowed);
     // Note: style is NOT copied - discrete is not shown in output
 
     // Use heading line location instead of full section location
@@ -410,7 +625,7 @@ fn transform_discrete_section<'src>(
         let base = get_base_position(source, idx, content_span.start);
         for raw_child in raw_blocks {
             let (mut child_blocks, child_diags) =
-                transform_raw_block(raw_child, content, &content_idx);
+                transform_raw_block_inner(raw_child, content, &content_idx, id_registry);
             diagnostics.extend(child_diags);
             for child in &mut child_blocks {
                 offset_block_locations(child, base);
@@ -430,9 +645,10 @@ pub(super) fn transform_raw_blocks<'src>(
 ) -> (Vec<Block<'src>>, Vec<ParseDiagnostic>) {
     let mut blocks = Vec::new();
     let mut diagnostics = Vec::new();
+    let mut id_registry: HashMap<String, usize> = HashMap::new();
 
     for raw in raw_blocks {
-        let (transformed, diags) = transform_raw_block(raw, source, idx);
+        let (transformed, diags) = transform_raw_block_inner(raw, source, idx, &mut id_registry);
         diagnostics.extend(diags);
         blocks.extend(transformed);
     }

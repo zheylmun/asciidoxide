@@ -3,6 +3,8 @@
 //! These types store content as byte spans rather than parsed inline nodes,
 //! allowing block structure to be identified before inline parsing.
 
+use std::collections::HashMap;
+
 use crate::asg::Location;
 use crate::span::SourceSpan;
 
@@ -26,6 +28,10 @@ pub(super) struct RawBlock<'src> {
     pub(super) roles: Vec<&'src str>,
     /// Options from block attributes.
     pub(super) options: Vec<&'src str>,
+    /// Positional attributes from block attribute line (all comma-separated values).
+    pub(super) positionals: Vec<&'src str>,
+    /// Named attributes from block attribute line (key=value pairs).
+    pub(super) named_attributes: HashMap<&'src str, &'src str>,
 
     // --- Content fields (exactly one of these is Some based on content model) ---
     /// Title content span (to be parsed as inlines in phase 3).
@@ -38,6 +44,8 @@ pub(super) struct RawBlock<'src> {
     pub(super) items: Option<Vec<RawBlock<'src>>>,
     /// Principal content span for list items.
     pub(super) principal_span: Option<SourceSpan>,
+    /// Term spans for description list items (each is parsed as inlines).
+    pub(super) term_spans: Vec<SourceSpan>,
     /// Reftext span for cross-references.
     pub(super) reftext_span: Option<SourceSpan>,
 
@@ -48,6 +56,9 @@ pub(super) struct RawBlock<'src> {
     pub(super) variant: Option<&'static str>,
     /// List item marker.
     pub(super) marker: Option<&'src str>,
+
+    /// Target for block macros (e.g., `image::target[...]`).
+    pub(super) target: Option<&'src str>,
 
     /// For sections: location of just the heading line (for discrete heading conversion).
     pub(super) heading_line_location: Option<Location>,
@@ -67,15 +78,19 @@ impl RawBlock<'_> {
             style: None,
             roles: Vec::new(),
             options: Vec::new(),
+            positionals: Vec::new(),
+            named_attributes: HashMap::new(),
             title_span: None,
             content_span: None,
             blocks: None,
             items: None,
             principal_span: None,
+            term_spans: Vec::new(),
             reftext_span: None,
             level: None,
             variant: None,
             marker: None,
+            target: None,
             heading_line_location: None,
             location: None,
         }
@@ -97,6 +112,10 @@ pub(super) struct PendingMetadata<'src> {
     pub(super) roles: Vec<&'src str>,
     /// Options from `%option` shorthand.
     pub(super) options: Vec<&'src str>,
+    /// Positional attributes (all comma-separated values).
+    pub(super) positionals: Vec<&'src str>,
+    /// Named attributes (key=value pairs).
+    pub(super) named_attributes: HashMap<&'src str, &'src str>,
     /// Reftext span from `[[id,reftext]]`.
     pub(super) reftext_span: Option<SourceSpan>,
 }
@@ -123,5 +142,13 @@ impl<'src> PendingMetadata<'src> {
         }
         block.roles.extend(self.roles);
         block.options.extend(self.options);
+        if block.positionals.is_empty() {
+            block.positionals = self.positionals;
+        }
+        if block.named_attributes.is_empty() {
+            block.named_attributes = self.named_attributes;
+        } else {
+            block.named_attributes.extend(self.named_attributes);
+        }
     }
 }

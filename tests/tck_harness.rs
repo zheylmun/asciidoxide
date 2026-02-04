@@ -201,7 +201,7 @@ struct JsonBlock<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     delimiter: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    id: Option<&'a str>,
+    id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     style: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -235,7 +235,7 @@ impl<'a> From<&asg::Block<'a>> for JsonBlock<'a> {
             node_type: "block",
             form: b.form,
             delimiter: b.delimiter,
-            id: b.id,
+            id: b.id.as_ref().map(ToString::to_string),
             style: b.style,
             reftext: b
                 .reftext
