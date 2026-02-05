@@ -80,7 +80,7 @@ This command:
 
 The TCK harness output shows a tree of test results:
 
-```
+```text
 ▶ tests
   ▶ inline
     ▶ span
@@ -117,7 +117,7 @@ echo '{"contents":"*bold*","path":"test","type":"inline"}' | \
 
 ## Project Structure
 
-```
+```text
 src/
 ├── lib.rs          # Library entry points: parse_document, parse_inline
 ├── asg.rs          # Abstract Semantic Graph types (Document, Block, InlineNode, etc.)
