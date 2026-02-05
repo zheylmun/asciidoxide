@@ -137,8 +137,8 @@ struct JsonDocument<'a> {
     location: Option<JsonLocation>,
 }
 
-impl<'a> From<&asg::Document<'a>> for JsonDocument<'a> {
-    fn from(doc: &asg::Document<'a>) -> Self {
+impl<'a> From<&'a asg::Document<'a>> for JsonDocument<'a> {
+    fn from(doc: &'a asg::Document<'a>) -> Self {
         Self {
             name: "document",
             node_type: "block",
@@ -156,16 +156,48 @@ impl<'a> From<&asg::Document<'a>> for JsonDocument<'a> {
 }
 
 #[derive(Serialize)]
+struct JsonAuthor<'a> {
+    fullname: &'a str,
+    initials: &'a str,
+    firstname: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    middlename: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lastname: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    address: Option<&'a str>,
+}
+
+impl<'a> From<&'a asg::Author<'a>> for JsonAuthor<'a> {
+    fn from(a: &'a asg::Author<'a>) -> Self {
+        Self {
+            fullname: a.fullname,
+            initials: &a.initials,
+            firstname: a.firstname,
+            middlename: a.middlename,
+            lastname: a.lastname,
+            address: a.address,
+        }
+    }
+}
+
+#[derive(Serialize)]
 struct JsonHeader<'a> {
     title: Vec<JsonInlineNode<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    authors: Option<Vec<JsonAuthor<'a>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     location: Option<JsonLocation>,
 }
 
-impl<'a> From<&asg::Header<'a>> for JsonHeader<'a> {
-    fn from(h: &asg::Header<'a>) -> Self {
+impl<'a> From<&'a asg::Header<'a>> for JsonHeader<'a> {
+    fn from(h: &'a asg::Header<'a>) -> Self {
         Self {
             title: h.title.iter().map(JsonInlineNode::from).collect(),
+            authors: h
+                .authors
+                .as_ref()
+                .map(|a| a.iter().map(JsonAuthor::from).collect()),
             location: h.location.as_ref().map(convert_location),
         }
     }
@@ -203,6 +235,8 @@ struct JsonBlock<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    target: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     style: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reftext: Option<Vec<JsonInlineNode<'a>>>,
@@ -225,6 +259,8 @@ struct JsonBlock<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     principal: Option<Vec<JsonInlineNode<'a>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    terms: Option<Vec<Vec<JsonInlineNode<'a>>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     location: Option<JsonLocation>,
 }
 
@@ -236,6 +272,7 @@ impl<'a> From<&asg::Block<'a>> for JsonBlock<'a> {
             form: b.form,
             delimiter: b.delimiter,
             id: b.id.as_ref().map(ToString::to_string),
+            target: b.target,
             style: b.style,
             reftext: b
                 .reftext
@@ -265,6 +302,12 @@ impl<'a> From<&asg::Block<'a>> for JsonBlock<'a> {
                 .principal
                 .as_ref()
                 .map(|v| v.iter().map(JsonInlineNode::from).collect()),
+            terms: b.terms.as_ref().map(|term_groups| {
+                term_groups
+                    .iter()
+                    .map(|group| group.iter().map(JsonInlineNode::from).collect())
+                    .collect()
+            }),
             location: b.location.as_ref().map(convert_location),
         }
     }
