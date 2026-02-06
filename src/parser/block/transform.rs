@@ -149,32 +149,43 @@ fn get_base_position(_source: &str, idx: &SourceIndex, byte_offset: usize) -> Po
     loc[0]
 }
 
-/// Transform a `RawBlock` into one or more Blocks by parsing inline content.
-///
-/// This is phase 3 of the parsing pipeline.
-/// The `source` is the original full source, and `idx` is its `SourceIndex`.
-///
-/// Returns a vector because discrete sections expand into a heading plus sibling blocks.
-///
-/// An `id_registry` is threaded through for section ID deduplication.
-#[allow(clippy::too_many_lines)]
-fn transform_raw_block_inner<'src>(
-    raw: RawBlock<'src>,
-    source: &'src str,
-    idx: &SourceIndex,
-    id_registry: &mut HashMap<String, usize>,
-) -> (Vec<Block<'src>>, Vec<ParseDiagnostic>) {
-    // Handle discrete sections specially - they expand into heading + sibling blocks
-    if raw.name == "section" && raw.style == Some("discrete") {
-        return transform_discrete_section(raw, source, idx, id_registry);
+/// Result of style promotion analysis.
+struct StylePromotion<'a> {
+    name: &'static str,
+    language: Option<&'a str>,
+    attribution: Option<&'a str>,
+    citetitle: Option<&'a str>,
+    emit_style: Option<&'a str>,
+}
+
+/// Map a raw block name to a static string.
+fn static_block_name(name: &str) -> &'static str {
+    match name {
+        "literal" => "literal",
+        "listing" => "listing",
+        "pass" => "pass",
+        "quote" => "quote",
+        "section" => "section",
+        "example" => "example",
+        "sidebar" => "sidebar",
+        "open" => "open",
+        "list" => "list",
+        "dlist" => "dlist",
+        "listItem" => "listItem",
+        "dlistItem" => "dlistItem",
+        "break" => "break",
+        "heading" => "heading",
+        "image" => "image",
+        "verse" => "verse",
+        "stem" => "stem",
+        _ => "paragraph",
     }
+}
 
-    let mut diagnostics = Vec::new();
-
-    // --- Style promotion ---
-    // Apply style-based name changes and extract language attribute
-    let mut promoted_name: &str = raw.name;
-    let mut language: Option<&'src str> = None;
+/// Analyze style attributes and determine promoted name and extracted attributes.
+fn analyze_style_promotion<'a>(raw: &RawBlock<'a>) -> StylePromotion<'a> {
+    let mut promoted_name: &'static str = static_block_name(raw.name);
+    let mut language: Option<&'a str> = None;
     let style = raw.style;
     let positionals = &raw.positionals;
 
@@ -182,12 +193,11 @@ fn transform_raw_block_inner<'src>(
         // [source] on literal block → listing
         (Some("source"), "literal") => {
             promoted_name = "listing";
-            // Second positional is language
             if positionals.len() > 1 && !positionals[1].is_empty() {
                 language = Some(positionals[1]);
             }
         }
-        // [source] or [source,lang] on listing → listing (stays same) + language
+        // [source] or [source,lang] on listing → listing + language
         (Some("source"), "listing") => {
             if positionals.len() > 1 && !positionals[1].is_empty() {
                 language = Some(positionals[1]);
@@ -202,17 +212,13 @@ fn transform_raw_block_inner<'src>(
             }
         }
         // [stem] on pass → stem
-        (Some("stem"), "pass") => {
-            promoted_name = "stem";
-        }
+        (Some("stem"), "pass") => promoted_name = "stem",
         // [verse] on quote → verse
-        (Some("verse"), "quote") => {
-            promoted_name = "verse";
-        }
+        (Some("verse"), "quote") => promoted_name = "verse",
         _ => {}
     }
 
-    // For fenced code blocks (listing with backtick delimiter), extract language from positionals
+    // For fenced code blocks, extract language from positionals
     if raw.name == "listing"
         && raw.delimiter.is_some_and(|d| d.starts_with('`'))
         && positionals.len() > 1
@@ -221,9 +227,9 @@ fn transform_raw_block_inner<'src>(
         language = Some(positionals[1]);
     }
 
-    // For quote/verse blocks, extract attribution (2nd pos) and citetitle (3rd pos)
-    let mut attribution: Option<&'src str> = None;
-    let mut citetitle: Option<&'src str> = None;
+    // For quote/verse blocks, extract attribution and citetitle
+    let mut attribution: Option<&'a str> = None;
+    let mut citetitle: Option<&'a str> = None;
     if matches!(promoted_name, "quote" | "verse") {
         if positionals.len() > 1 && !positionals[1].is_empty() {
             attribution = Some(positionals[1].trim());
@@ -233,149 +239,177 @@ fn transform_raw_block_inner<'src>(
         }
     }
 
-    // Style is consumed (not emitted in output) for promotion styles
+    // Style is consumed for promotion styles
     let emit_style = match style {
         Some("source" | "listing" | "stem" | "verse" | "quote") => None,
         other => other,
     };
 
-    let mut block = Block::new(promoted_name);
-    block.form = raw.form;
-    block.delimiter = raw.delimiter;
-    block.id = raw.id.map(Cow::Borrowed);
-    block.style = emit_style;
-    block.target = raw.target;
-    block.level = raw.level;
-    block.variant = raw.variant;
-    block.marker = raw.marker;
-    block.location = raw.location;
+    StylePromotion {
+        name: promoted_name,
+        language,
+        attribution,
+        citetitle,
+        emit_style,
+    }
+}
 
-    // Build metadata if we have roles, options, named attributes, or language
-    // Filter out consumed attributes (caption, id, style are not emitted)
-    let mut meta_attributes: std::collections::HashMap<&str, &str> = raw
-        .named_attributes
-        .into_iter()
-        .filter(|(k, _)| !matches!(*k, "caption" | "id" | "style"))
-        .collect();
-    if let Some(lang) = language {
-        meta_attributes.insert("language", lang);
-    }
-    if let Some(attr) = attribution {
-        meta_attributes.insert("attribution", attr);
-    }
-    if let Some(cite) = citetitle {
-        meta_attributes.insert("citetitle", cite);
-    }
-    if !raw.roles.is_empty() || !raw.options.is_empty() || !meta_attributes.is_empty() {
-        block.metadata = Some(BlockMetadata {
-            roles: raw.roles,
-            options: raw.options,
-            attributes: meta_attributes,
-        });
+/// Parse a span as inlines with location adjustment.
+fn parse_span_as_inlines<'src>(
+    span: SourceSpan,
+    source: &'src str,
+    idx: &SourceIndex,
+) -> (Vec<InlineNode<'src>>, Vec<ParseDiagnostic>) {
+    let content = &source[span.start..span.end];
+    let tokens = lex(content);
+    let content_idx = SourceIndex::new(content);
+    let (mut inlines, diags) = run_inline_parser(&tokens, content, &content_idx);
+
+    let base = get_base_position(source, idx, span.start);
+    for inline in &mut inlines {
+        offset_inline_location(inline, base);
     }
 
-    // Parse title span as inlines (with location adjustment)
-    if let Some(title_span) = raw.title_span {
-        let title_content = &source[title_span.start..title_span.end];
-        let title_tokens = lex(title_content);
-        let title_idx = SourceIndex::new(title_content);
-        let (mut title_inlines, title_diags) =
-            run_inline_parser(&title_tokens, title_content, &title_idx);
-        diagnostics.extend(title_diags);
+    (inlines, diags)
+}
 
-        // Adjust locations to be relative to original source
-        let base = get_base_position(source, idx, title_span.start);
-        for inline in &mut title_inlines {
-            offset_inline_location(inline, base);
+/// Parse content span as child blocks with location adjustment.
+fn parse_span_as_blocks<'src>(
+    span: SourceSpan,
+    source: &'src str,
+    idx: &SourceIndex,
+    id_registry: &mut HashMap<String, usize>,
+) -> (Vec<Block<'src>>, Vec<ParseDiagnostic>) {
+    let content = &source[span.start..span.end];
+    let tokens = lex(content);
+    let content_idx = SourceIndex::new(content);
+    let (raw_blocks, mut diagnostics) =
+        super::boundary::parse_raw_blocks(&tokens, content, &content_idx);
+
+    let base = get_base_position(source, idx, span.start);
+    let mut child_blocks = Vec::new();
+    for raw_child in raw_blocks {
+        let (mut children, child_diags) =
+            transform_raw_block_inner(raw_child, content, &content_idx, id_registry);
+        diagnostics.extend(child_diags);
+        for child in &mut children {
+            offset_block_locations(child, base);
         }
-        block.title = Some(title_inlines);
+        child_blocks.extend(children);
     }
 
-    // Parse reftext span as inlines (with location adjustment)
-    if let Some(reftext_span) = raw.reftext_span {
-        let reftext_content = &source[reftext_span.start..reftext_span.end];
-        let reftext_tokens = lex(reftext_content);
-        let reftext_idx = SourceIndex::new(reftext_content);
-        let (mut reftext_inlines, reftext_diags) =
-            run_inline_parser(&reftext_tokens, reftext_content, &reftext_idx);
-        diagnostics.extend(reftext_diags);
+    (child_blocks, diagnostics)
+}
 
-        let base = get_base_position(source, idx, reftext_span.start);
-        for inline in &mut reftext_inlines {
-            offset_inline_location(inline, base);
+/// Handle verbatim block content (listing, literal, pass, stem).
+fn handle_verbatim_content<'src>(
+    content_span: Option<SourceSpan>,
+    source: &'src str,
+    idx: &SourceIndex,
+) -> Option<Vec<InlineNode<'src>>> {
+    let span = content_span?;
+    let content = &source[span.start..span.end];
+    let trimmed = content.trim_matches('\n');
+
+    if trimmed.is_empty() {
+        return Some(vec![]);
+    }
+
+    let leading_stripped = content.len() - content.trim_start_matches('\n').len();
+    let trimmed_start = span.start + leading_stripped;
+    let trimmed_span = SourceSpan {
+        start: trimmed_start,
+        end: trimmed_start + trimmed.len(),
+    };
+    let location = idx.location(&trimmed_span);
+
+    Some(vec![InlineNode::Text(TextNode {
+        value: trimmed,
+        location: Some(location),
+    })])
+}
+
+/// Handle list item content (principal, terms, continuation blocks, nested lists).
+fn handle_list_item_content<'src>(
+    raw: &RawBlock<'src>,
+    block: &mut Block<'src>,
+    source: &'src str,
+    idx: &SourceIndex,
+    id_registry: &mut HashMap<String, usize>,
+) -> Vec<ParseDiagnostic> {
+    let mut diagnostics = Vec::new();
+
+    // Parse principal span as inlines
+    if let Some(principal_span) = raw.principal_span {
+        let (principal, diags) = parse_span_as_inlines(principal_span, source, idx);
+        diagnostics.extend(diags);
+        block.principal = Some(principal);
+    }
+
+    // Parse term spans as inlines (for description list items)
+    if !raw.term_spans.is_empty() {
+        let mut terms = Vec::new();
+        for term_span in &raw.term_spans {
+            let (term_inlines, diags) = parse_span_as_inlines(*term_span, source, idx);
+            diagnostics.extend(diags);
+            terms.push(term_inlines);
         }
-        block.reftext = Some(reftext_inlines);
+        block.terms = Some(terms);
     }
 
-    // Auto-generate section IDs when no explicit ID is set and no style is applied
-    if promoted_name == "section"
-        && block.id.is_none()
-        && style.is_none()
-        && let Some(title_span) = raw.title_span
-    {
-        let title_text = &source[title_span.start..title_span.end];
-        let slug = slugify(title_text);
-        let count = id_registry.entry(slug.clone()).or_insert(0);
-        *count += 1;
-        if *count == 1 {
-            block.id = Some(Cow::Owned(slug));
+    // Parse continuation content as blocks
+    if let Some(content_span) = raw.content_span {
+        let (child_blocks, diags) = parse_span_as_blocks(content_span, source, idx, id_registry);
+        diagnostics.extend(diags);
+        block.blocks = Some(child_blocks);
+    }
+
+    // Transform nested blocks (nested lists from boundary parser)
+    if let Some(ref nested_blocks) = raw.blocks {
+        let mut transformed_nested = Vec::new();
+        for nested in nested_blocks {
+            let (transformed, nested_diags) =
+                transform_raw_block_inner(nested.clone(), source, idx, id_registry);
+            diagnostics.extend(nested_diags);
+            transformed_nested.extend(transformed);
+        }
+        if let Some(existing) = &mut block.blocks {
+            existing.extend(transformed_nested);
         } else {
-            block.id = Some(Cow::Owned(format!("{slug}_{count}")));
+            block.blocks = Some(transformed_nested);
         }
     }
 
-    // Handle content based on block type (using promoted name)
+    diagnostics
+}
+
+/// Handle content parsing based on block type.
+fn handle_block_content<'src>(
+    raw: &RawBlock<'src>,
+    block: &mut Block<'src>,
+    promoted_name: &str,
+    source: &'src str,
+    idx: &SourceIndex,
+    id_registry: &mut HashMap<String, usize>,
+) -> Vec<ParseDiagnostic> {
+    let mut diagnostics = Vec::new();
+
     match promoted_name {
-        // Verbatim blocks: content stays as raw text (with proper location)
-        // Leading and trailing blank lines are stripped.
         "listing" | "literal" | "pass" | "stem" => {
-            if let Some(content_span) = raw.content_span {
-                let content = &source[content_span.start..content_span.end];
-                // Strip leading and trailing blank lines
-                let trimmed = content.trim_matches('\n');
-                if trimmed.is_empty() {
-                    block.inlines = Some(vec![]);
-                } else {
-                    let leading_stripped = content.len() - content.trim_start_matches('\n').len();
-                    let trimmed_start = content_span.start + leading_stripped;
-                    let trimmed_end = trimmed_start + trimmed.len();
-                    let trimmed_span = SourceSpan {
-                        start: trimmed_start,
-                        end: trimmed_end,
-                    };
-                    let location = idx.location(&trimmed_span);
-                    block.inlines = Some(vec![InlineNode::Text(TextNode {
-                        value: trimmed,
-                        location: Some(location),
-                    })]);
-                }
-            } else {
-                block.inlines = Some(vec![]);
-            }
+            block.inlines = handle_verbatim_content(raw.content_span, source, idx)
+                .or_else(|| Some(vec![]));
         }
 
-        // Basic content blocks: parse content as inlines
         "paragraph" => {
             if let Some(content_span) = raw.content_span {
-                let content = &source[content_span.start..content_span.end];
-                let content_tokens = lex(content);
-                let content_idx = SourceIndex::new(content);
-                let (mut inlines, content_diags) =
-                    run_inline_parser(&content_tokens, content, &content_idx);
-                diagnostics.extend(content_diags);
-
-                // Adjust locations
-                let base = get_base_position(source, idx, content_span.start);
-                for inline in &mut inlines {
-                    offset_inline_location(inline, base);
-                }
+                let (inlines, diags) = parse_span_as_inlines(content_span, source, idx);
+                diagnostics.extend(diags);
                 block.inlines = Some(inlines);
             } else {
                 block.inlines = Some(vec![]);
             }
         }
 
-        // Verse blocks: content preserved as raw text with newlines
         "verse" => {
             if let Some(content_span) = raw.content_span {
                 let content = &source[content_span.start..content_span.end];
@@ -389,176 +423,144 @@ fn transform_raw_block_inner<'src>(
             }
         }
 
-        // Compound blocks: recursively parse content as blocks
-        "example" | "sidebar" | "quote" | "open" => {
+        "example" | "sidebar" | "quote" | "open" | "section" => {
             if let Some(content_span) = raw.content_span {
-                let content = &source[content_span.start..content_span.end];
-                let content_tokens = lex(content);
-                let content_idx = SourceIndex::new(content);
-                let (raw_blocks, block_diags) =
-                    super::boundary::parse_raw_blocks(&content_tokens, content, &content_idx);
-                diagnostics.extend(block_diags);
-
-                // Recursively transform child blocks
-                let base = get_base_position(source, idx, content_span.start);
-                let mut child_blocks = Vec::new();
-                for raw_child in raw_blocks {
-                    let (mut children, child_diags) =
-                        transform_raw_block_inner(raw_child, content, &content_idx, id_registry);
-                    diagnostics.extend(child_diags);
-                    // Adjust all locations in the child block tree
-                    for child in &mut children {
-                        offset_block_locations(child, base);
-                    }
-                    child_blocks.extend(children);
-                }
-                block.blocks = Some(child_blocks);
+                let (children, diags) =
+                    parse_span_as_blocks(content_span, source, idx, id_registry);
+                diagnostics.extend(diags);
+                block.blocks = Some(children);
             } else {
                 block.blocks = Some(vec![]);
             }
         }
 
-        // Sections: title is already handled above, body content is recursively parsed
-        "section" => {
-            if let Some(content_span) = raw.content_span {
-                let content = &source[content_span.start..content_span.end];
-                let content_tokens = lex(content);
-                let content_idx = SourceIndex::new(content);
-                let (raw_blocks, block_diags) =
-                    super::boundary::parse_raw_blocks(&content_tokens, content, &content_idx);
-                diagnostics.extend(block_diags);
-
-                // Recursively transform child blocks
-                let base = get_base_position(source, idx, content_span.start);
-                let mut child_blocks = Vec::new();
-                for raw_child in raw_blocks {
-                    let (mut children, child_diags) =
-                        transform_raw_block_inner(raw_child, content, &content_idx, id_registry);
-                    diagnostics.extend(child_diags);
-                    for child in &mut children {
-                        offset_block_locations(child, base);
-                    }
-                    child_blocks.extend(children);
-                }
-                block.blocks = Some(child_blocks);
-            } else {
-                block.blocks = Some(vec![]);
-            }
-        }
-
-        // Lists: items need to be transformed (list items don't expand to multiple blocks)
         "list" | "dlist" => {
-            if let Some(items) = raw.items {
+            if let Some(ref items) = raw.items {
                 let mut transformed_items = Vec::new();
                 for item in items {
                     let (transformed, item_diags) =
-                        transform_raw_block_inner(item, source, idx, id_registry);
+                        transform_raw_block_inner(item.clone(), source, idx, id_registry);
                     diagnostics.extend(item_diags);
-                    // List items always produce exactly one block
                     transformed_items.extend(transformed);
                 }
                 block.items = Some(transformed_items);
             }
         }
 
-        // List items: parse principal span as inlines
         "listItem" | "dlistItem" => {
-            if let Some(principal_span) = raw.principal_span {
-                let content = &source[principal_span.start..principal_span.end];
-                let content_tokens = lex(content);
-                let content_idx = SourceIndex::new(content);
-                let (mut principal, principal_diags) =
-                    run_inline_parser(&content_tokens, content, &content_idx);
-                diagnostics.extend(principal_diags);
-
-                let base = get_base_position(source, idx, principal_span.start);
-                for inline in &mut principal {
-                    offset_inline_location(inline, base);
-                }
-                block.principal = Some(principal);
-            }
-
-            // Parse term spans as inlines (for description list items)
-            if !raw.term_spans.is_empty() {
-                let mut terms = Vec::new();
-                for term_span in &raw.term_spans {
-                    let content = &source[term_span.start..term_span.end];
-                    let content_tokens = lex(content);
-                    let content_idx = SourceIndex::new(content);
-                    let (mut term_inlines, term_diags) =
-                        run_inline_parser(&content_tokens, content, &content_idx);
-                    diagnostics.extend(term_diags);
-
-                    let base = get_base_position(source, idx, term_span.start);
-                    for inline in &mut term_inlines {
-                        offset_inline_location(inline, base);
-                    }
-                    terms.push(term_inlines);
-                }
-                block.terms = Some(terms);
-            }
-
-            // Parse continuation content as blocks (for list continuation `+`)
-            if let Some(content_span) = raw.content_span {
-                let content = &source[content_span.start..content_span.end];
-                let content_tokens = lex(content);
-                let content_idx = SourceIndex::new(content);
-                let (raw_blocks, block_diags) =
-                    super::boundary::parse_raw_blocks(&content_tokens, content, &content_idx);
-                diagnostics.extend(block_diags);
-
-                let base = get_base_position(source, idx, content_span.start);
-                let mut child_blocks = Vec::new();
-                for raw_child in raw_blocks {
-                    let (mut children, child_diags) =
-                        transform_raw_block_inner(raw_child, content, &content_idx, id_registry);
-                    diagnostics.extend(child_diags);
-                    for child in &mut children {
-                        offset_block_locations(child, base);
-                    }
-                    child_blocks.extend(children);
-                }
-                block.blocks = Some(child_blocks);
-            }
-
-            // Transform nested blocks (nested lists from boundary parser)
-            if let Some(nested_blocks) = raw.blocks {
-                let mut transformed_nested = Vec::new();
-                for nested in nested_blocks {
-                    let (transformed, nested_diags) =
-                        transform_raw_block_inner(nested, source, idx, id_registry);
-                    diagnostics.extend(nested_diags);
-                    transformed_nested.extend(transformed);
-                }
-                if let Some(existing) = &mut block.blocks {
-                    existing.extend(transformed_nested);
-                } else {
-                    block.blocks = Some(transformed_nested);
-                }
-            }
+            let item_diags = handle_list_item_content(raw, block, source, idx, id_registry);
+            diagnostics.extend(item_diags);
         }
 
-        // Breaks, headings, and block macros: no content to transform
         "break" | "heading" | "image" => {}
 
-        // Default: try to parse content_span as inlines if present
         _ => {
             if let Some(content_span) = raw.content_span {
-                let content = &source[content_span.start..content_span.end];
-                let content_tokens = lex(content);
-                let content_idx = SourceIndex::new(content);
-                let (mut inlines, content_diags) =
-                    run_inline_parser(&content_tokens, content, &content_idx);
-                diagnostics.extend(content_diags);
-
-                let base = get_base_position(source, idx, content_span.start);
-                for inline in &mut inlines {
-                    offset_inline_location(inline, base);
-                }
+                let (inlines, diags) = parse_span_as_inlines(content_span, source, idx);
+                diagnostics.extend(diags);
                 block.inlines = Some(inlines);
             }
         }
     }
+
+    diagnostics
+}
+
+/// Transform a `RawBlock` into one or more Blocks by parsing inline content.
+///
+/// This is phase 3 of the parsing pipeline.
+/// The `source` is the original full source, and `idx` is its `SourceIndex`.
+///
+/// Returns a vector because discrete sections expand into a heading plus sibling blocks.
+///
+/// An `id_registry` is threaded through for section ID deduplication.
+fn transform_raw_block_inner<'src>(
+    raw: RawBlock<'src>,
+    source: &'src str,
+    idx: &SourceIndex,
+    id_registry: &mut HashMap<String, usize>,
+) -> (Vec<Block<'src>>, Vec<ParseDiagnostic>) {
+    // Handle discrete sections specially
+    if raw.name == "section" && raw.style == Some("discrete") {
+        return transform_discrete_section(raw, source, idx, id_registry);
+    }
+
+    let mut diagnostics = Vec::new();
+
+    // Analyze style and extract promoted name, language, etc.
+    let promotion = analyze_style_promotion(&raw);
+
+    // Build the block with basic fields
+    let mut block = Block::new(promotion.name);
+    block.form = raw.form;
+    block.delimiter = raw.delimiter;
+    block.id = raw.id.map(Cow::Borrowed);
+    block.style = promotion.emit_style;
+    block.target = raw.target;
+    block.level = raw.level;
+    block.variant = raw.variant;
+    block.marker = raw.marker;
+    block.location = raw.location;
+
+    // Build metadata
+    let mut meta_attributes: std::collections::HashMap<&str, &str> = raw
+        .named_attributes
+        .iter()
+        .filter(|(k, _)| !matches!(**k, "caption" | "id" | "style"))
+        .map(|(k, v)| (*k, *v))
+        .collect();
+    if let Some(lang) = promotion.language {
+        meta_attributes.insert("language", lang);
+    }
+    if let Some(attr) = promotion.attribution {
+        meta_attributes.insert("attribution", attr);
+    }
+    if let Some(cite) = promotion.citetitle {
+        meta_attributes.insert("citetitle", cite);
+    }
+    if !raw.roles.is_empty() || !raw.options.is_empty() || !meta_attributes.is_empty() {
+        block.metadata = Some(BlockMetadata {
+            roles: raw.roles.clone(),
+            options: raw.options.clone(),
+            attributes: meta_attributes,
+        });
+    }
+
+    // Parse title span as inlines
+    if let Some(title_span) = raw.title_span {
+        let (inlines, diags) = parse_span_as_inlines(title_span, source, idx);
+        diagnostics.extend(diags);
+        block.title = Some(inlines);
+    }
+
+    // Parse reftext span as inlines
+    if let Some(reftext_span) = raw.reftext_span {
+        let (inlines, diags) = parse_span_as_inlines(reftext_span, source, idx);
+        diagnostics.extend(diags);
+        block.reftext = Some(inlines);
+    }
+
+    // Auto-generate section IDs
+    if promotion.name == "section"
+        && block.id.is_none()
+        && raw.style.is_none()
+        && let Some(title_span) = raw.title_span
+    {
+        let title_text = &source[title_span.start..title_span.end];
+        let slug = slugify(title_text);
+        let count = id_registry.entry(slug.clone()).or_insert(0);
+        *count += 1;
+        block.id = Some(Cow::Owned(if *count == 1 {
+            slug
+        } else {
+            format!("{slug}_{count}")
+        }));
+    }
+
+    // Handle content based on block type
+    let content_diags =
+        handle_block_content(&raw, &mut block, promotion.name, source, idx, id_registry);
+    diagnostics.extend(content_diags);
 
     (vec![block], diagnostics)
 }

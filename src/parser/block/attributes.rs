@@ -465,6 +465,254 @@ fn is_revision_line(line: &str) -> bool {
     trimmed.as_bytes()[0].is_ascii_digit()
 }
 
+/// Apply an attribute entry to the attributes map.
+fn apply_attribute_entry<'src>(
+    entry: AttributeEntry<'src>,
+    attributes: &mut HashMap<&'src str, AttributeValue<'src>>,
+) {
+    match entry {
+        AttributeEntry::Set { key, value } => {
+            let value = resolve_attr_refs(value, attributes);
+            attributes.insert(key, value);
+        }
+        AttributeEntry::Delete { key } => {
+            attributes.remove(key);
+        }
+    }
+}
+
+/// Parse all attribute entries starting from a given token index.
+///
+/// Returns the final token index after all entries are consumed.
+fn parse_all_attribute_entries<'src>(
+    tokens: &[Spanned<'src>],
+    mut i: usize,
+    source: &'src str,
+    attributes: &mut HashMap<&'src str, AttributeValue<'src>>,
+) -> usize {
+    while let Some((entry, next)) = try_parse_attribute_entry(tokens, i, source) {
+        apply_attribute_entry(entry, attributes);
+        i = next;
+    }
+    i
+}
+
+/// Skip block attribute lines (e.g., `[glossary]`) at the start of tokens.
+fn skip_block_attribute_lines(tokens: &[Spanned<'_>]) -> usize {
+    let mut i = 0;
+    while i < tokens.len() && matches!(tokens[i].0, Token::LBracket) {
+        // Skip to end of line
+        while i < tokens.len() && !matches!(tokens[i].0, Token::Newline) {
+            i += 1;
+        }
+        // Skip newline
+        if i < tokens.len() {
+            i += 1;
+        }
+    }
+    i
+}
+
+/// Try to extract a titled header (`= Title`) starting at `start_idx`.
+///
+/// Returns `Some(HeaderResult)` if a valid title is found, `None` otherwise.
+fn try_extract_titled_header<'src>(
+    tokens: &[Spanned<'src>],
+    start_idx: usize,
+    source: &'src str,
+    idx: &SourceIndex,
+) -> Option<HeaderResult<'src>> {
+    // Check for titled document: Eq Whitespace <content>
+    if start_idx + 2 >= tokens.len()
+        || !matches!(tokens[start_idx].0, Token::Eq)
+        || !matches!(tokens[start_idx + 1].0, Token::Whitespace)
+    {
+        return None;
+    }
+
+    // Find the Newline (or end-of-tokens) that terminates the title line.
+    let title_start = start_idx + 2;
+    let mut title_end = title_start;
+    while title_end < tokens.len() && !matches!(tokens[title_end].0, Token::Newline) {
+        title_end += 1;
+    }
+
+    if title_start >= title_end {
+        return None;
+    }
+
+    let title_tokens = &tokens[title_start..title_end];
+    let (title_inlines, diagnostics) = run_inline_parser(title_tokens, source, idx);
+
+    let header_start = tokens[start_idx].1.start;
+    let mut span_end = tokens[title_end - 1].1.end;
+
+    // Advance past the title's terminating Newline (if present).
+    let mut i = if title_end < tokens.len() {
+        title_end + 1
+    } else {
+        title_end
+    };
+
+    // Try to parse author and revision lines
+    let (authors, new_i, new_span_end) =
+        parse_author_and_revision(tokens, i, span_end, source);
+    i = new_i;
+    span_end = new_span_end;
+
+    // Parse attribute entry lines.
+    // When there's no author/revision, attribute entries extend the header span.
+    let mut attributes = HashMap::new();
+    while let Some((entry, next)) = try_parse_attribute_entry(tokens, i, source) {
+        if authors.is_none() {
+            // Extend header span to include attribute entries
+            span_end = tokens[next - 1].1.end;
+            if next > 0 && matches!(tokens[next - 1].0, Token::Newline) {
+                span_end = tokens[next - 2].1.end;
+            }
+        }
+        apply_attribute_entry(entry, &mut attributes);
+        i = next;
+    }
+
+    let header_span = SourceSpan {
+        start: header_start,
+        end: span_end,
+    };
+
+    let header = Header {
+        title: title_inlines,
+        authors,
+        location: Some(idx.location(&header_span)),
+    };
+
+    Some(HeaderResult {
+        header: Some(header),
+        body_start: i,
+        diagnostics,
+        attributes: Some(attributes),
+    })
+}
+
+/// Parse author line and optional revision line following a title.
+///
+/// Returns `(authors, next_token_index, span_end)`.
+fn parse_author_and_revision<'src>(
+    tokens: &[Spanned<'src>],
+    mut i: usize,
+    mut span_end: usize,
+    source: &'src str,
+) -> (Option<Vec<Author<'src>>>, usize, usize) {
+    let mut authors: Option<Vec<Author<'src>>> = None;
+
+    if !is_author_line(tokens, i) {
+        return (authors, i, span_end);
+    }
+
+    let line_start = i;
+    while i < tokens.len() && !matches!(tokens[i].0, Token::Newline) {
+        i += 1;
+    }
+    let author_text = &source[tokens[line_start].1.start..tokens[i - 1].1.end];
+    let parsed = parse_authors(author_text);
+    if !parsed.is_empty() {
+        span_end = tokens[i - 1].1.end;
+        authors = Some(parsed);
+    }
+    // Consume trailing newline
+    if i < tokens.len() && matches!(tokens[i].0, Token::Newline) {
+        i += 1;
+    }
+
+    // Try to parse revision line (only valid after author line)
+    if i < tokens.len() && !matches!(tokens[i].0, Token::Colon | Token::Newline) {
+        let rev_line_start = i;
+        while i < tokens.len() && !matches!(tokens[i].0, Token::Newline) {
+            i += 1;
+        }
+        let rev_text = &source[tokens[rev_line_start].1.start..tokens[i - 1].1.end];
+        if is_revision_line(rev_text) {
+            span_end = tokens[i - 1].1.end;
+        } else {
+            // Not a revision line — rewind
+            i = rev_line_start;
+        }
+        // Consume trailing newline
+        if i < tokens.len() && matches!(tokens[i].0, Token::Newline) {
+            i += 1;
+        }
+    }
+
+    (authors, i, span_end)
+}
+
+/// Try to create a header from a `:doctitle:` attribute.
+fn try_create_doctitle_header<'src>(
+    tokens: &[Spanned<'src>],
+    body_start: usize,
+    source: &'src str,
+    idx: &SourceIndex,
+    mut attributes: HashMap<&'src str, AttributeValue<'src>>,
+) -> Option<HeaderResult<'src>> {
+    let doctitle_val = attributes.remove("doctitle")?;
+    let doctitle_str = doctitle_val.resolve();
+
+    // Find the doctitle value span for the title inlines location
+    let title_value = match &doctitle_val {
+        AttributeValue::Single(s) => *s,
+        _ => {
+            // For non-single values, we can't borrow — return without header
+            return Some(HeaderResult {
+                header: None,
+                body_start,
+                diagnostics: Vec::new(),
+                attributes: Some(attributes),
+            });
+        }
+    };
+
+    let title_location = {
+        let val_str: &str = doctitle_str.as_ref();
+        source.find(val_str).map(|offset| {
+            let val_span = SourceSpan {
+                start: offset,
+                end: offset + val_str.len(),
+            };
+            idx.location(&val_span)
+        })
+    };
+
+    let title_inlines = vec![crate::asg::InlineNode::Text(crate::asg::TextNode {
+        value: title_value,
+        location: title_location,
+    })];
+
+    // Compute header location (from first attribute to end of doctitle line)
+    let mut header_end = tokens[0].1.start;
+    let mut ti = 0;
+    while ti < tokens.len() && !matches!(tokens[ti].0, Token::Newline) {
+        header_end = tokens[ti].1.end;
+        ti += 1;
+    }
+    let header_span = SourceSpan {
+        start: tokens[0].1.start,
+        end: header_end,
+    };
+
+    let header = Header {
+        title: title_inlines,
+        authors: None,
+        location: Some(idx.location(&header_span)),
+    };
+
+    Some(HeaderResult {
+        header: Some(header),
+        body_start,
+        diagnostics: Vec::new(),
+        attributes: Some(attributes),
+    })
+}
+
 /// Detect a document header (`= Title`) at the start of the token stream.
 ///
 /// When a header is found, `attributes` is `Some(map)` (possibly empty).
@@ -472,231 +720,41 @@ fn is_revision_line(line: &str) -> bool {
 /// parsed into the map.
 ///
 /// Also handles body-only attribute documents (no title, just `:key: value` lines).
-#[allow(clippy::too_many_lines)]
 pub(crate) fn extract_header<'src>(
     tokens: &[Spanned<'src>],
     source: &'src str,
     idx: &SourceIndex,
 ) -> HeaderResult<'src> {
     // Skip optional block attribute lines (e.g., `[glossary]`) before the title.
-    let mut header_token_start: usize = 0;
-    while header_token_start < tokens.len()
-        && matches!(tokens[header_token_start].0, Token::LBracket)
-    {
-        // Skip to end of line
-        while header_token_start < tokens.len()
-            && !matches!(tokens[header_token_start].0, Token::Newline)
-        {
-            header_token_start += 1;
-        }
-        // Skip newline
-        if header_token_start < tokens.len() {
-            header_token_start += 1;
-        }
-    }
+    let header_token_start = skip_block_attribute_lines(tokens);
 
     // First, check for titled document: Eq Whitespace <content>
-    if header_token_start + 2 < tokens.len()
-        && matches!(tokens[header_token_start].0, Token::Eq)
-        && matches!(tokens[header_token_start + 1].0, Token::Whitespace)
-    {
-        // Find the Newline (or end-of-tokens) that terminates the title line.
-        let title_start = header_token_start + 2;
-        let mut title_end = title_start;
-        while title_end < tokens.len() && !matches!(tokens[title_end].0, Token::Newline) {
-            title_end += 1;
-        }
-
-        if title_start < title_end {
-            let title_tokens = &tokens[title_start..title_end];
-            let (title_inlines, diagnostics) = run_inline_parser(title_tokens, source, idx);
-
-            let header_start = tokens[header_token_start].1.start;
-            let mut span_end = tokens[title_end - 1].1.end;
-
-            // Advance past the title's terminating Newline (if present).
-            let mut i = if title_end < tokens.len() {
-                title_end + 1
-            } else {
-                title_end
-            };
-
-            // Try to parse author line
-            let mut authors: Option<Vec<Author<'src>>> = None;
-            if is_author_line(tokens, i) {
-                let line_start = i;
-                while i < tokens.len() && !matches!(tokens[i].0, Token::Newline) {
-                    i += 1;
-                }
-                let author_text = &source[tokens[line_start].1.start..tokens[i - 1].1.end];
-                let parsed = parse_authors(author_text);
-                if !parsed.is_empty() {
-                    span_end = tokens[i - 1].1.end;
-                    authors = Some(parsed);
-                }
-                // Consume trailing newline
-                if i < tokens.len() && matches!(tokens[i].0, Token::Newline) {
-                    i += 1;
-                }
-
-                // Try to parse revision line (only valid after author line)
-                if i < tokens.len() && !matches!(tokens[i].0, Token::Colon | Token::Newline) {
-                    let rev_line_start = i;
-                    while i < tokens.len() && !matches!(tokens[i].0, Token::Newline) {
-                        i += 1;
-                    }
-                    let rev_text = &source[tokens[rev_line_start].1.start..tokens[i - 1].1.end];
-                    if is_revision_line(rev_text) {
-                        // Revision is parsed but not included in ASG output
-                        // (only extends header location)
-                        span_end = tokens[i - 1].1.end;
-                    } else {
-                        // Not a revision line — rewind
-                        i = rev_line_start;
-                    }
-                    // Consume trailing newline
-                    if i < tokens.len() && matches!(tokens[i].0, Token::Newline) {
-                        i += 1;
-                    }
-                }
-            }
-
-            // Parse attribute entry lines using the shared parser.
-            // When there's no author/revision, attribute entries extend the header span.
-            // When there IS an author/revision, they don't.
-            let mut attributes = HashMap::new();
-            while let Some((entry, next)) = try_parse_attribute_entry(tokens, i, source) {
-                if authors.is_none() {
-                    // Extend header span to include attribute entries
-                    span_end = tokens[next - 1].1.end;
-                    if next > 0 && matches!(tokens[next - 1].0, Token::Newline) {
-                        span_end = tokens[next - 2].1.end;
-                    }
-                }
-                match entry {
-                    AttributeEntry::Set { key, value } => {
-                        let value = resolve_attr_refs(value, &attributes);
-                        attributes.insert(key, value);
-                    }
-                    AttributeEntry::Delete { key } => {
-                        attributes.remove(key);
-                    }
-                }
-                i = next;
-            }
-
-            let header_span = SourceSpan {
-                start: header_start,
-                end: span_end,
-            };
-
-            let header = Header {
-                title: title_inlines,
-                authors,
-                location: Some(idx.location(&header_span)),
-            };
-
-            return HeaderResult {
-                header: Some(header),
-                body_start: i,
-                diagnostics,
-                attributes: Some(attributes),
-            };
-        }
+    if let Some(result) = try_extract_titled_header(tokens, header_token_start, source, idx) {
+        return result;
     }
 
     // Second, check for body-only attribute entries (no title).
-    if let Some((entry, mut next)) = try_parse_attribute_entry(tokens, 0, source) {
+    if let Some((entry, first_next)) = try_parse_attribute_entry(tokens, 0, source) {
         let mut attributes = HashMap::new();
-        match entry {
-            AttributeEntry::Set { key, value } => {
-                let value = resolve_attr_refs(value, &attributes);
-                attributes.insert(key, value);
-            }
-            AttributeEntry::Delete { key } => {
-                attributes.remove(key);
-            }
-        }
+        apply_attribute_entry(entry, &mut attributes);
 
         // Continue parsing additional attribute entries.
-        while let Some((e, n)) = try_parse_attribute_entry(tokens, next, source) {
-            match e {
-                AttributeEntry::Set { key, value } => {
-                    let value = resolve_attr_refs(value, &attributes);
-                    attributes.insert(key, value);
-                }
-                AttributeEntry::Delete { key } => {
-                    attributes.remove(key);
-                }
-            }
-            next = n;
-        }
+        let next = parse_all_attribute_entries(tokens, first_next, source, &mut attributes);
 
         // Check for :doctitle: attribute → create header
-        if let Some(doctitle_val) = attributes.remove("doctitle") {
-            let doctitle_str = doctitle_val.resolve();
-            // Find the :doctitle: line to get accurate location
-            // The header span covers from the first token to the end of the doctitle line
-            let header_span = SourceSpan {
-                start: tokens[0].1.start,
-                end: tokens[next.min(tokens.len()) - 1].1.end,
-            };
-            // Find the doctitle value span for the title inlines location
-            // We need to find where "doctitle" value starts in the source
-            let title_inlines = vec![crate::asg::InlineNode::Text(crate::asg::TextNode {
-                value: match &doctitle_val {
-                    AttributeValue::Single(s) => s,
-                    _ => {
-                        // For non-single values, we can't borrow — skip location
-                        return HeaderResult {
-                            header: None,
-                            body_start: next,
-                            diagnostics: Vec::new(),
-                            attributes: Some(attributes),
-                        };
-                    }
-                },
-                location: {
-                    // Find the doctitle value in source to compute location
-                    let val_str: &str = doctitle_str.as_ref();
-                    if let Some(offset) = source.find(val_str) {
-                        let val_span = SourceSpan {
-                            start: offset,
-                            end: offset + val_str.len(),
-                        };
-                        Some(idx.location(&val_span))
-                    } else {
-                        None
-                    }
-                },
-            })];
-
-            // Compute header location (from first attribute to end of doctitle line)
-            let mut header_end = tokens[0].1.start;
-            // Walk tokens to find end of the doctitle entry line
-            let mut ti = 0;
-            while ti < tokens.len() && !matches!(tokens[ti].0, Token::Newline) {
-                header_end = tokens[ti].1.end;
-                ti += 1;
+        if attributes.contains_key("doctitle") {
+            if let Some(result) =
+                try_create_doctitle_header(tokens, next, source, idx, attributes)
+            {
+                return result;
             }
-            let doctitle_header_span = SourceSpan {
-                start: tokens[0].1.start,
-                end: header_end,
-            };
-
-            let header = Header {
-                title: title_inlines,
-                authors: None,
-                location: Some(idx.location(&doctitle_header_span)),
-            };
-
-            let _ = header_span; // used for calculation above
-
+            // If try_create_doctitle_header returned None, we can't continue
+            // because attributes was consumed. This shouldn't happen in practice.
             return HeaderResult {
-                header: Some(header),
+                header: None,
                 body_start: next,
                 diagnostics: Vec::new(),
-                attributes: Some(attributes),
+                attributes: None,
             };
         }
 

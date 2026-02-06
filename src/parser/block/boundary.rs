@@ -48,6 +48,80 @@ where
         .then_ignore(line_end())
 }
 
+/// Result of extracting an embedded anchor from a title.
+struct EmbeddedAnchor<'a> {
+    /// The ID extracted from `[[id]]` or `[[id,reftext]]`.
+    id: &'a str,
+    /// Byte offset of the reftext within the original title string, if present.
+    reftext_offset: Option<(usize, usize)>,
+    /// Byte offset where the title content ends (before the anchor).
+    title_end_offset: usize,
+}
+
+/// Extract an embedded anchor (`[[id]]` or `[[id,reftext]]`) from the end of a title.
+///
+/// Returns `None` if no valid anchor is found.
+fn extract_embedded_anchor(title: &str, title_end_offset: usize) -> Option<EmbeddedAnchor<'_>> {
+    let segment = title[..title_end_offset].trim_end();
+    let anchor_start = segment.rfind("[[")?;
+    let anchor_end = segment[anchor_start..].find("]]")?;
+
+    let anchor_inner = &segment[anchor_start + 2..anchor_start + anchor_end];
+    let (id_part, reftext_offset) = if let Some(comma) = anchor_inner.find(',') {
+        let reftext_start = anchor_start + 2 + comma + 1;
+        let reftext_len = anchor_inner.len() - comma - 1;
+        (
+            &anchor_inner[..comma],
+            Some((reftext_start, reftext_start + reftext_len)),
+        )
+    } else {
+        (anchor_inner, None)
+    };
+
+    if id_part.is_empty() || !is_valid_anchor_id(id_part) {
+        return None;
+    }
+
+    let before_anchor = segment[..anchor_start].trim_end();
+    Some(EmbeddedAnchor {
+        id: &title[anchor_start + 2..anchor_start + 2 + id_part.len()],
+        reftext_offset,
+        title_end_offset: before_anchor.len(),
+    })
+}
+
+/// Strip trailing symmetric heading marker (e.g., ` ==` for level 1).
+fn strip_trailing_eq_marker(title: &str, eq_count: usize) -> usize {
+    let trimmed = title.trim_end();
+    let eq_marker: String = " ".to_string() + &"=".repeat(eq_count);
+    if trimmed.ends_with(&eq_marker) {
+        trimmed.len() - eq_marker.len()
+    } else {
+        title.len()
+    }
+}
+
+/// Strip trailing symmetric hash marker (e.g., ` ##` for level 1).
+#[allow(dead_code)] // Will be used when refactoring markdown_heading
+fn strip_trailing_hash_marker(title: &str, hash_count: usize) -> usize {
+    let trimmed = title.trim_end();
+    let hash_marker: String = " ".to_string() + &"#".repeat(hash_count);
+    if trimmed.ends_with(&hash_marker) {
+        trimmed.len() - hash_marker.len()
+    } else {
+        title.len()
+    }
+}
+
+/// Trim trailing newlines from a body content span.
+fn trim_trailing_newlines(source: &str, start: usize, end: usize) -> usize {
+    let mut actual_end = end;
+    while actual_end > start && source.as_bytes().get(actual_end - 1) == Some(&b'\n') {
+        actual_end -= 1;
+    }
+    actual_end
+}
+
 // ---------------------------------------------------------------------------
 // Break Parsers
 // ---------------------------------------------------------------------------
@@ -1192,51 +1266,20 @@ where
 
         // Post-process title to extract embedded anchors and strip trailing symmetric markers
         let raw_title = &source[raw_title_span.start..raw_title_span.end];
-        let mut title_end_offset = raw_title.len();
+        let mut title_end_offset = strip_trailing_eq_marker(raw_title, eq_count);
         let mut embedded_id: Option<&'src str> = None;
         let mut embedded_reftext_span: Option<SourceSpan> = None;
 
-        // Strip trailing symmetric `==` marker (e.g., ` ==` at end)
-        {
-            let trimmed = raw_title[..title_end_offset].trim_end();
-            let eq_marker: String = " ".to_string() + &"=".repeat(eq_count);
-            if trimmed.ends_with(&eq_marker) {
-                title_end_offset = trimmed.len() - eq_marker.len();
+        // Check for embedded anchor
+        if let Some(anchor) = extract_embedded_anchor(raw_title, title_end_offset) {
+            embedded_id = Some(anchor.id);
+            if let Some((start_off, end_off)) = anchor.reftext_offset {
+                embedded_reftext_span = Some(SourceSpan {
+                    start: raw_title_span.start + start_off,
+                    end: raw_title_span.start + end_off,
+                });
             }
-        }
-
-        // Check for embedded anchor `[[id]]` or `[[id,reftext]]` before the trailing marker
-        {
-            let segment = raw_title[..title_end_offset].trim_end();
-            if let Some(anchor_start) = segment.rfind("[[")
-                && let Some(anchor_end) = segment[anchor_start..].find("]]")
-            {
-                let anchor_inner = &segment[anchor_start + 2..anchor_start + anchor_end];
-                let (id_part, reftext_part) = if let Some(comma) = anchor_inner.find(',') {
-                    (&anchor_inner[..comma], Some(&anchor_inner[comma + 1..]))
-                } else {
-                    (anchor_inner, None)
-                };
-
-                if !id_part.is_empty() && is_valid_anchor_id(id_part) {
-                    embedded_id = Some(
-                        &source[raw_title_span.start + anchor_start + 2
-                            ..raw_title_span.start + anchor_start + 2 + id_part.len()],
-                    );
-
-                    if let Some(reftext) = reftext_part {
-                        let reftext_start =
-                            raw_title_span.start + anchor_start + 2 + id_part.len() + 1;
-                        embedded_reftext_span = Some(SourceSpan {
-                            start: reftext_start,
-                            end: reftext_start + reftext.len(),
-                        });
-                    }
-
-                    let before_anchor = segment[..anchor_start].trim_end();
-                    title_end_offset = before_anchor.len();
-                }
-            }
+            title_end_offset = anchor.title_end_offset;
         }
 
         let title_span = SourceSpan {
@@ -1293,42 +1336,20 @@ where
 
         let body_end_span: SourceSpan = inp.span_since(&body_cursor);
         let body_end = body_end_span.end;
+        let actual_body_end = trim_trailing_newlines(source, body_start, body_end);
 
-        // Trim trailing newlines from body content
-        let mut actual_body_end = body_end;
-        while actual_body_end > body_start
-            && source.as_bytes().get(actual_body_end - 1) == Some(&b'\n')
-        {
-            actual_body_end -= 1;
-        }
-
-        let mut block = RawBlock::new("section");
-        block.level = Some(level);
-        block.title_span = Some(title_span);
-        block.heading_line_location = Some(idx.location(&heading_line_span));
-        if let Some(eid) = embedded_id {
-            block.id = Some(eid);
-        }
-        if let Some(refspan) = embedded_reftext_span {
-            block.reftext_span = Some(refspan);
-        }
-        if body_start < actual_body_end {
-            block.content_span = Some(SourceSpan {
-                start: body_start,
-                end: actual_body_end,
-            });
-            // Section location spans from heading to end of last body content
-            let block_span: SourceSpan = SourceSpan {
-                start: heading_line_span.start,
-                end: actual_body_end,
-            };
-            block.location = Some(idx.location(&block_span));
-        } else {
-            // No body content — section location is just the heading line
-            block.location = Some(idx.location(&heading_line_span));
-        }
-
-        Ok(block)
+        Ok(build_section_block(
+            &SectionParams {
+                level,
+                title_span,
+                heading_line_span,
+                embedded_id,
+                reftext_span: embedded_reftext_span,
+                body_start,
+                body_end: actual_body_end,
+            },
+            idx,
+        ))
     })
 }
 
@@ -1452,34 +1473,69 @@ where
 
         let body_end_span: SourceSpan = inp.span_since(&body_cursor);
         let body_end = body_end_span.end;
+        let actual_body_end = trim_trailing_newlines(source, body_start, body_end);
 
-        let mut actual_body_end = body_end;
-        while actual_body_end > body_start
-            && source.as_bytes().get(actual_body_end - 1) == Some(&b'\n')
-        {
-            actual_body_end -= 1;
-        }
-
-        let mut block = RawBlock::new("section");
-        block.level = Some(level);
-        block.title_span = Some(title_span);
-        block.heading_line_location = Some(idx.location(&heading_line_span));
-        if body_start < actual_body_end {
-            block.content_span = Some(SourceSpan {
-                start: body_start,
-                end: actual_body_end,
-            });
-            let block_span = SourceSpan {
-                start: heading_line_span.start,
-                end: actual_body_end,
-            };
-            block.location = Some(idx.location(&block_span));
-        } else {
-            block.location = Some(idx.location(&heading_line_span));
-        }
-
-        Ok(block)
+        Ok(build_section_block(
+            &SectionParams {
+                level,
+                title_span,
+                heading_line_span,
+                embedded_id: None,
+                reftext_span: None,
+                body_start,
+                body_end: actual_body_end,
+            },
+            idx,
+        ))
     })
+}
+
+/// Parameters for building a section block.
+struct SectionParams<'src> {
+    level: usize,
+    title_span: SourceSpan,
+    heading_line_span: SourceSpan,
+    embedded_id: Option<&'src str>,
+    reftext_span: Option<SourceSpan>,
+    body_start: usize,
+    body_end: usize,
+}
+
+/// Build a section `RawBlock` with common fields.
+fn build_section_block<'src>(params: &SectionParams<'src>, idx: &SourceIndex) -> RawBlock<'src> {
+    let SectionParams {
+        level,
+        title_span,
+        heading_line_span,
+        embedded_id,
+        reftext_span,
+        body_start,
+        body_end,
+    } = *params;
+    let mut block = RawBlock::new("section");
+    block.level = Some(level);
+    block.title_span = Some(title_span);
+    block.heading_line_location = Some(idx.location(&heading_line_span));
+    if let Some(eid) = embedded_id {
+        block.id = Some(eid);
+    }
+    if let Some(refspan) = reftext_span {
+        block.reftext_span = Some(refspan);
+    }
+    if body_start < body_end {
+        block.content_span = Some(SourceSpan {
+            start: body_start,
+            end: body_end,
+        });
+        let block_span = SourceSpan {
+            start: heading_line_span.start,
+            end: body_end,
+        };
+        block.location = Some(idx.location(&block_span));
+    } else {
+        block.location = Some(idx.location(&heading_line_span));
+    }
+    block
 }
 
 /// Parse a setext-style section heading (title followed by underline of 10+ hyphens).
