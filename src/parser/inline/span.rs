@@ -116,13 +116,20 @@ where
     I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
     P: Parser<'tokens, I, InlineNode<'src>, ParseExtra<'tokens, 'src>> + Clone + 'tokens,
 {
-    let inner_content = inner
+    // For unconstrained (**), use negative lookahead to stop before **.
+    // This prevents the inner parser from consuming potential closing delimiters.
+    let not_double_star = just(Token::Star)
+        .then(just(Token::Star))
+        .not()
+        .rewind();
+
+    let inner_unconstrained = not_double_star
+        .ignore_then(inner.clone())
         .repeated()
         .at_least(1)
         .collect::<Vec<InlineNode<'src>>>();
 
-    let unconstrained = inner_content
-        .clone()
+    let unconstrained = inner_unconstrained
         .delimited_by(
             just(Token::Star).then(just(Token::Star)),
             just(Token::Star).then(just(Token::Star)),
@@ -137,11 +144,21 @@ where
             })
         });
 
+    // For constrained (*), use negative lookahead to stop before single *.
+    // This prevents exponential backtracking when parsing alternating spans.
+    let not_star = just(Token::Star).not().rewind();
+
+    let inner_constrained = not_star
+        .ignore_then(inner)
+        .repeated()
+        .at_least(1)
+        .collect::<Vec<InlineNode<'src>>>();
+
     // Constrained opener: Star or StarEscaped (for escaped unconstrained)
     let constrained_opener = choice((just(Token::Star), just(Token::StarEscaped)));
 
     let constrained = constrained_opener
-        .ignore_then(inner_content)
+        .ignore_then(inner_constrained)
         .then_ignore(just(Token::Star))
         .map_with(move |inlines: Vec<InlineNode<'src>>, e| {
             let span: SourceSpan = e.span();
@@ -175,13 +192,19 @@ where
     I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
     P: Parser<'tokens, I, InlineNode<'src>, ParseExtra<'tokens, 'src>> + Clone + 'tokens,
 {
-    let inner_content = inner
+    // For unconstrained (__), use negative lookahead to stop before __.
+    let not_double_underscore = just(Token::Underscore)
+        .then(just(Token::Underscore))
+        .not()
+        .rewind();
+
+    let inner_unconstrained = not_double_underscore
+        .ignore_then(inner.clone())
         .repeated()
         .at_least(1)
         .collect::<Vec<InlineNode<'src>>>();
 
-    let unconstrained = inner_content
-        .clone()
+    let unconstrained = inner_unconstrained
         .delimited_by(
             just(Token::Underscore).then(just(Token::Underscore)),
             just(Token::Underscore).then(just(Token::Underscore)),
@@ -196,11 +219,20 @@ where
             })
         });
 
+    // For constrained (_), use negative lookahead to stop before single _.
+    let not_underscore = just(Token::Underscore).not().rewind();
+
+    let inner_constrained = not_underscore
+        .ignore_then(inner)
+        .repeated()
+        .at_least(1)
+        .collect::<Vec<InlineNode<'src>>>();
+
     // Constrained opener: Underscore or UnderscoreEscaped (for escaped unconstrained)
     let constrained_opener = choice((just(Token::Underscore), just(Token::UnderscoreEscaped)));
 
     let constrained = constrained_opener
-        .ignore_then(inner_content)
+        .ignore_then(inner_constrained)
         .then_ignore(just(Token::Underscore))
         .map_with(move |inlines: Vec<InlineNode<'src>>, e| {
             let span: SourceSpan = e.span();
@@ -234,13 +266,16 @@ where
     I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
     P: Parser<'tokens, I, InlineNode<'src>, ParseExtra<'tokens, 'src>> + Clone + 'tokens,
 {
-    let inner_content = inner
+    // For unconstrained (##), use negative lookahead to stop before ##.
+    let not_double_hash = just(Token::Hash).then(just(Token::Hash)).not().rewind();
+
+    let inner_unconstrained = not_double_hash
+        .ignore_then(inner.clone())
         .repeated()
         .at_least(1)
         .collect::<Vec<InlineNode<'src>>>();
 
-    let unconstrained = inner_content
-        .clone()
+    let unconstrained = inner_unconstrained
         .delimited_by(
             just(Token::Hash).then(just(Token::Hash)),
             just(Token::Hash).then(just(Token::Hash)),
@@ -255,11 +290,20 @@ where
             })
         });
 
+    // For constrained (#), use negative lookahead to stop before single #.
+    let not_hash = just(Token::Hash).not().rewind();
+
+    let inner_constrained = not_hash
+        .ignore_then(inner)
+        .repeated()
+        .at_least(1)
+        .collect::<Vec<InlineNode<'src>>>();
+
     // Constrained opener: Hash or HashEscaped (for escaped unconstrained)
     let constrained_opener = choice((just(Token::Hash), just(Token::HashEscaped)));
 
     let constrained = constrained_opener
-        .ignore_then(inner_content)
+        .ignore_then(inner_constrained)
         .then_ignore(just(Token::Hash))
         .map_with(move |inlines: Vec<InlineNode<'src>>, e| {
             let span: SourceSpan = e.span();
