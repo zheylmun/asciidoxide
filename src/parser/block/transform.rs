@@ -331,7 +331,7 @@ fn handle_verbatim_content<'src>(
 
 /// Handle list item content (principal, terms, continuation blocks, nested lists).
 fn handle_list_item_content<'src>(
-    raw: &RawBlock<'src>,
+    raw: &mut RawBlock<'src>,
     block: &mut Block<'src>,
     source: &'src str,
     idx: &SourceIndex,
@@ -348,7 +348,7 @@ fn handle_list_item_content<'src>(
 
     // Parse term spans as inlines (for description list items)
     if !raw.term_spans.is_empty() {
-        let mut terms = Vec::new();
+        let mut terms = Vec::with_capacity(raw.term_spans.len());
         for term_span in &raw.term_spans {
             let (term_inlines, diags) = parse_span_as_inlines(*term_span, source, idx);
             diagnostics.extend(diags);
@@ -365,11 +365,12 @@ fn handle_list_item_content<'src>(
     }
 
     // Transform nested blocks (nested lists from boundary parser)
-    if let Some(ref nested_blocks) = raw.blocks {
-        let mut transformed_nested = Vec::new();
+    // Use .take() to avoid cloning the Vec
+    if let Some(nested_blocks) = raw.blocks.take() {
+        let mut transformed_nested = Vec::with_capacity(nested_blocks.len());
         for nested in nested_blocks {
             let (transformed, nested_diags) =
-                transform_raw_block_inner(nested.clone(), source, idx, id_registry);
+                transform_raw_block_inner(nested, source, idx, id_registry);
             diagnostics.extend(nested_diags);
             transformed_nested.extend(transformed);
         }
@@ -385,7 +386,7 @@ fn handle_list_item_content<'src>(
 
 /// Handle content parsing based on block type.
 fn handle_block_content<'src>(
-    raw: &RawBlock<'src>,
+    raw: &mut RawBlock<'src>,
     block: &mut Block<'src>,
     promoted_name: &str,
     source: &'src str,
@@ -435,11 +436,12 @@ fn handle_block_content<'src>(
         }
 
         "list" | "dlist" => {
-            if let Some(ref items) = raw.items {
-                let mut transformed_items = Vec::new();
+            // Use .take() to avoid cloning the Vec
+            if let Some(items) = raw.items.take() {
+                let mut transformed_items = Vec::with_capacity(items.len());
                 for item in items {
                     let (transformed, item_diags) =
-                        transform_raw_block_inner(item.clone(), source, idx, id_registry);
+                        transform_raw_block_inner(item, source, idx, id_registry);
                     diagnostics.extend(item_diags);
                     transformed_items.extend(transformed);
                 }
