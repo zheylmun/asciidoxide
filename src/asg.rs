@@ -371,5 +371,4 @@ mod tests {
         assert!(b.terms.is_none());
         assert!(b.location.is_none());
     }
-
 }
