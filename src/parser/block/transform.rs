@@ -554,18 +554,26 @@ fn transform_raw_block_inner<'src>(
         let title_text = &source[title_span.start..title_span.end];
         let slug = slugify(title_text);
         // Avoid cloning slug for the common case of first occurrence
-        block.id = Some(Cow::Owned(if let Some(count) = id_registry.get_mut(&slug) {
-            *count += 1;
-            format!("{slug}_{count}")
-        } else {
-            id_registry.insert(slug.clone(), 1);
-            slug
-        }));
+        block.id = Some(Cow::Owned(
+            if let Some(count) = id_registry.get_mut(&slug) {
+                *count += 1;
+                format!("{slug}_{count}")
+            } else {
+                id_registry.insert(slug.clone(), 1);
+                slug
+            },
+        ));
     }
 
     // Handle content based on block type
-    let content_diags =
-        handle_block_content(&mut raw, &mut block, promotion.name, source, idx, id_registry);
+    let content_diags = handle_block_content(
+        &mut raw,
+        &mut block,
+        promotion.name,
+        source,
+        idx,
+        id_registry,
+    );
     diagnostics.extend(content_diags);
 
     (vec![block], diagnostics)
