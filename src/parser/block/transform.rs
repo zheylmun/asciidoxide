@@ -553,12 +553,13 @@ fn transform_raw_block_inner<'src>(
     {
         let title_text = &source[title_span.start..title_span.end];
         let slug = slugify(title_text);
-        let count = id_registry.entry(slug.clone()).or_insert(0);
-        *count += 1;
-        block.id = Some(Cow::Owned(if *count == 1 {
-            slug
-        } else {
+        // Avoid cloning slug for the common case of first occurrence
+        block.id = Some(Cow::Owned(if let Some(count) = id_registry.get_mut(&slug) {
+            *count += 1;
             format!("{slug}_{count}")
+        } else {
+            id_registry.insert(slug.clone(), 1);
+            slug
         }));
     }
 
