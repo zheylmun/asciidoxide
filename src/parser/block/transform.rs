@@ -287,7 +287,7 @@ fn parse_span_as_blocks<'src>(
         super::boundary::parse_raw_blocks(&tokens, content, &content_idx);
 
     let base = get_base_position(source, idx, span.start);
-    let mut child_blocks = Vec::new();
+    let mut child_blocks = Vec::with_capacity(raw_blocks.len());
     for raw_child in raw_blocks {
         let (mut children, child_diags) =
             transform_raw_block_inner(raw_child, content, &content_idx, id_registry);
@@ -651,7 +651,7 @@ pub(super) fn transform_raw_blocks<'src>(
     source: &'src str,
     idx: &SourceIndex,
 ) -> (Vec<Block<'src>>, Vec<ParseDiagnostic>) {
-    let mut blocks = Vec::new();
+    let mut blocks = Vec::with_capacity(raw_blocks.len());
     let mut diagnostics = Vec::new();
     let mut id_registry: HashMap<String, usize> = HashMap::new();
 
