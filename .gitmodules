@@ -3,7 +3,7 @@
 	url = https://gitlab.eclipse.org/eclipse/asciidoc-lang/asciidoc-lang.git
 [submodule "language_repositories/asciidoc_tck"]
 	path = language_repositories/asciidoc_tck
-	url = https://gitlab.eclipse.org/eclipse/asciidoc-lang/asciidoc-tck.git
+	url = https://gitlab.eclipse.org/zheylmun/asciidoc-tck.git
 [submodule "language_repositories/asciidoctor"]
 	path = language_repositories/asciidoctor
 	url = https://github.com/asciidoctor/asciidoctor.git
