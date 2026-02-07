@@ -6,4 +6,4 @@
 	url = https://gitlab.eclipse.org/eclipse/asciidoc-lang/asciidoc-tck.git
 [submodule "language_repositories/asciidoctor"]
 	path = language_repositories/asciidoctor
-	url = git@github.com:asciidoctor/asciidoctor.git
+	url = https://github.com/asciidoctor/asciidoctor.git
