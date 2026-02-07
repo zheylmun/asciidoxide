@@ -477,7 +477,7 @@ fn handle_block_content<'src>(
 ///
 /// An `id_registry` is threaded through for section ID deduplication.
 fn transform_raw_block_inner<'src>(
-    raw: RawBlock<'src>,
+    mut raw: RawBlock<'src>,
     source: &'src str,
     idx: &SourceIndex,
     id_registry: &mut HashMap<String, usize>,
@@ -504,7 +504,7 @@ fn transform_raw_block_inner<'src>(
     block.marker = raw.marker;
     block.location = raw.location;
 
-    // Build metadata
+    // Build metadata - move roles/options instead of cloning
     let mut meta_attributes: std::collections::HashMap<&str, &str> = raw
         .named_attributes
         .iter()
@@ -520,10 +520,13 @@ fn transform_raw_block_inner<'src>(
     if let Some(cite) = promotion.citetitle {
         meta_attributes.insert("citetitle", cite);
     }
-    if !raw.roles.is_empty() || !raw.options.is_empty() || !meta_attributes.is_empty() {
+    // Move roles and options, avoiding clone
+    let roles = std::mem::take(&mut raw.roles);
+    let options = std::mem::take(&mut raw.options);
+    if !roles.is_empty() || !options.is_empty() || !meta_attributes.is_empty() {
         block.metadata = Some(BlockMetadata {
-            roles: raw.roles.clone(),
-            options: raw.options.clone(),
+            roles,
+            options,
             attributes: meta_attributes,
         });
     }
@@ -561,7 +564,7 @@ fn transform_raw_block_inner<'src>(
 
     // Handle content based on block type
     let content_diags =
-        handle_block_content(&raw, &mut block, promotion.name, source, idx, id_registry);
+        handle_block_content(&mut raw, &mut block, promotion.name, source, idx, id_registry);
     diagnostics.extend(content_diags);
 
     (vec![block], diagnostics)
