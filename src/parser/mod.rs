@@ -1,8 +1,9 @@
 //! Parser that transforms a token stream into ASG nodes.
 //!
-//! The **inline parser** is chumsky-based (recursive, composable for adding
-//! formatting variants). The **document/block parser** is procedural (a natural
-//! fit for `AsciiDoc`'s line-oriented block structure).
+//! Both the **inline parser** and **block parser** are chumsky-based. The inline
+//! parser uses recursive combinators for formatting. The block parser uses
+//! chumsky's `custom()` combinator for complex patterns like delimiter matching,
+//! which suits `AsciiDoc`'s line-oriented block structure.
 
 mod block;
 mod inline;
