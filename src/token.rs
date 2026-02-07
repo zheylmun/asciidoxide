@@ -173,3 +173,84 @@ impl std::fmt::Display for Token<'_> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_newline() {
+        assert_eq!(Token::Newline.to_string(), "newline");
+    }
+
+    #[test]
+    fn display_whitespace() {
+        assert_eq!(Token::Whitespace.to_string(), "whitespace");
+    }
+
+    #[test]
+    fn display_single_punct() {
+        assert_eq!(Token::Eq.to_string(), "'='");
+        assert_eq!(Token::Caret.to_string(), "'^'");
+        assert_eq!(Token::Tilde.to_string(), "'~'");
+        assert_eq!(Token::Plus.to_string(), "'+'");
+        assert_eq!(Token::Hyphen.to_string(), "'-'");
+        assert_eq!(Token::Dot.to_string(), "'.'");
+        assert_eq!(Token::Colon.to_string(), "':'");
+        assert_eq!(Token::Bang.to_string(), "'!'");
+        assert_eq!(Token::Slash.to_string(), "'/'");
+        assert_eq!(Token::Backslash.to_string(), "'\\'");
+        assert_eq!(Token::Pipe.to_string(), "'|'");
+        assert_eq!(Token::Comma.to_string(), "','");
+        assert_eq!(Token::DoubleQuote.to_string(), "'\"'");
+        assert_eq!(Token::SingleQuote.to_string(), "'''");
+        assert_eq!(Token::LBracket.to_string(), "'['");
+        assert_eq!(Token::RBracket.to_string(), "']'");
+        assert_eq!(Token::LBrace.to_string(), "'{'");
+        assert_eq!(Token::RBrace.to_string(), "'}'");
+    }
+
+    #[test]
+    fn display_double_angles() {
+        assert_eq!(Token::DoubleLeftAngle.to_string(), "'<<'");
+        assert_eq!(Token::DoubleRightAngle.to_string(), "'>>'");
+    }
+
+    #[test]
+    fn display_star_variants() {
+        assert_eq!(Token::Star.to_string(), "'*'");
+        assert_eq!(Token::StarEscaped.to_string(), "'*'");
+        assert_eq!(Token::StarAsText.to_string(), "'*'");
+    }
+
+    #[test]
+    fn display_underscore_variants() {
+        assert_eq!(Token::Underscore.to_string(), "'_'");
+        assert_eq!(Token::UnderscoreEscaped.to_string(), "'_'");
+        assert_eq!(Token::UnderscoreAsText.to_string(), "'_'");
+    }
+
+    #[test]
+    fn display_backtick_variants() {
+        assert_eq!(Token::Backtick.to_string(), "'`'");
+        assert_eq!(Token::BacktickEscaped.to_string(), "'`'");
+        assert_eq!(Token::BacktickAsText.to_string(), "'`'");
+    }
+
+    #[test]
+    fn display_hash_variants() {
+        assert_eq!(Token::Hash.to_string(), "'#'");
+        assert_eq!(Token::HashEscaped.to_string(), "'#'");
+        assert_eq!(Token::HashAsText.to_string(), "'#'");
+    }
+
+    #[test]
+    fn display_text() {
+        assert_eq!(Token::Text("hello").to_string(), "hello");
+    }
+
+    #[test]
+    fn display_placeholder() {
+        assert_eq!(Token::Placeholder(42).to_string(), "<placeholder:42>");
+    }
+}
