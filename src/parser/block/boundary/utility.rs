@@ -87,24 +87,34 @@ pub(super) fn extract_embedded_anchor(
 /// Strip trailing symmetric heading marker (e.g., ` ==` for level 1).
 pub(super) fn strip_trailing_eq_marker(title: &str, eq_count: usize) -> usize {
     let trimmed = title.trim_end();
-    let eq_marker: String = " ".to_string() + &"=".repeat(eq_count);
-    if trimmed.ends_with(&eq_marker) {
-        trimmed.len() - eq_marker.len()
-    } else {
-        title.len()
+    let bytes = trimmed.as_bytes();
+    let marker_len = 1 + eq_count; // space + eq_count '=' chars
+
+    if bytes.len() >= marker_len {
+        let marker_start = bytes.len() - marker_len;
+        // Check for space followed by eq_count '=' characters
+        if bytes[marker_start] == b' ' && bytes[marker_start + 1..].iter().all(|&b| b == b'=') {
+            return marker_start;
+        }
     }
+    title.len()
 }
 
 /// Strip trailing symmetric hash marker (e.g., ` ##` for level 1).
 #[allow(dead_code)] // Will be used when refactoring markdown_heading
 pub(super) fn strip_trailing_hash_marker(title: &str, hash_count: usize) -> usize {
     let trimmed = title.trim_end();
-    let hash_marker: String = " ".to_string() + &"#".repeat(hash_count);
-    if trimmed.ends_with(&hash_marker) {
-        trimmed.len() - hash_marker.len()
-    } else {
-        title.len()
+    let bytes = trimmed.as_bytes();
+    let marker_len = 1 + hash_count; // space + hash_count '#' chars
+
+    if bytes.len() >= marker_len {
+        let marker_start = bytes.len() - marker_len;
+        // Check for space followed by hash_count '#' characters
+        if bytes[marker_start] == b' ' && bytes[marker_start + 1..].iter().all(|&b| b == b'#') {
+            return marker_start;
+        }
     }
+    title.len()
 }
 
 /// Trim trailing newlines from a body content span.
