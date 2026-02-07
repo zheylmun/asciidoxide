@@ -232,4 +232,129 @@ mod tests {
         assert_eq!(idx.position(0), Position { line: 1, col: 1 });
         assert_eq!(idx.position(2), Position { line: 2, col: 1 });
     }
+
+    // ── SourceSpan Display / Debug ───────────────────────────────────
+
+    #[test]
+    fn span_display() {
+        let span = SourceSpan { start: 3, end: 10 };
+        assert_eq!(span.to_string(), "3..10");
+    }
+
+    #[test]
+    fn span_debug() {
+        let span = SourceSpan { start: 0, end: 5 };
+        assert_eq!(format!("{span:?}"), "0..5");
+    }
+
+    // ── From conversions ─────────────────────────────────────────────
+
+    #[test]
+    fn from_range_to_span() {
+        let span: SourceSpan = (2..8).into();
+        assert_eq!(span.start, 2);
+        assert_eq!(span.end, 8);
+    }
+
+    #[test]
+    fn from_span_to_range() {
+        let span = SourceSpan { start: 1, end: 4 };
+        let range: Range<usize> = span.into();
+        assert_eq!(range, 1..4);
+    }
+
+    #[test]
+    fn from_simple_span() {
+        use chumsky::span::Span;
+        let simple = chumsky::span::SimpleSpan::new((), 5..12);
+        let span: SourceSpan = simple.into();
+        assert_eq!(span.start, 5);
+        assert_eq!(span.end, 12);
+    }
+
+    // ── chumsky Span trait ───────────────────────────────────────────
+
+    #[test]
+    fn chumsky_span_new() {
+        use chumsky::span::Span;
+        let span = SourceSpan::new((), 3..7);
+        assert_eq!(span.start, 3);
+        assert_eq!(span.end, 7);
+    }
+
+    #[test]
+    fn chumsky_span_context() {
+        use chumsky::span::Span;
+        let span = SourceSpan { start: 0, end: 1 };
+        assert_eq!(span.context(), ());
+    }
+
+    #[test]
+    fn chumsky_span_start_end() {
+        use chumsky::span::Span;
+        let span = SourceSpan { start: 4, end: 9 };
+        assert_eq!(span.start(), 4);
+        assert_eq!(span.end(), 9);
+    }
+
+    // ── SourceIndex::location edge cases ─────────────────────────────
+
+    #[test]
+    fn location_empty_span() {
+        let src = "abc";
+        let idx = SourceIndex::new(src);
+        let span = SourceSpan { start: 1, end: 1 };
+        let loc = idx.location(&span);
+        // Empty span: end falls back to start
+        assert_eq!(loc[0], Position { line: 1, col: 2 });
+        assert_eq!(loc[1], Position { line: 1, col: 2 });
+    }
+
+    #[test]
+    fn location_single_byte_span() {
+        let src = "abc";
+        let idx = SourceIndex::new(src);
+        let span = SourceSpan { start: 1, end: 2 };
+        let loc = idx.location(&span);
+        assert_eq!(loc[0], Position { line: 1, col: 2 });
+        // Inclusive end: byte 1
+        assert_eq!(loc[1], Position { line: 1, col: 2 });
+    }
+
+    // ── Multi-byte UTF-8 ────────────────────────────────────────────
+
+    #[test]
+    fn multibyte_columns() {
+        // "aé b" — é is 2 bytes (0xC3 0xA9)
+        let src = "a\u{00e9}b";
+        let idx = SourceIndex::new(src);
+        // 'a' at byte 0 → col 1
+        assert_eq!(idx.position(0), Position { line: 1, col: 1 });
+        // 'é' at byte 1 (first byte of 2) → col 2
+        assert_eq!(idx.position(1), Position { line: 1, col: 2 });
+        // 'é' at byte 2 (second byte of 2) → still col 2
+        assert_eq!(idx.position(2), Position { line: 1, col: 2 });
+        // 'b' at byte 3 → col 3
+        assert_eq!(idx.position(3), Position { line: 1, col: 3 });
+    }
+
+    #[test]
+    fn multibyte_end_of_input() {
+        let src = "\u{00e9}"; // 2-byte char
+        let idx = SourceIndex::new(src);
+        // End of input (byte 2) → col 2 (past the single char)
+        assert_eq!(idx.position(2), Position { line: 1, col: 2 });
+    }
+
+    #[test]
+    fn multibyte_location_span() {
+        // "aéb\ncd"
+        let src = "a\u{00e9}b\ncd";
+        let idx = SourceIndex::new(src);
+        // Span covering "éb" → bytes 1..4
+        let span = SourceSpan { start: 1, end: 4 };
+        let loc = idx.location(&span);
+        assert_eq!(loc[0], Position { line: 1, col: 2 }); // 'é'
+        assert_eq!(loc[1], Position { line: 1, col: 3 }); // 'b' (inclusive end at byte 3)
+    }
 }
