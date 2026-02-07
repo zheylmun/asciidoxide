@@ -252,3 +252,124 @@ pub struct RawNode<'a> {
     /// Source location.
     pub location: Option<Location>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── AttributeValue::resolve ──────────────────────────────────────
+
+    #[test]
+    fn resolve_single() {
+        let v = AttributeValue::Single("hello");
+        assert_eq!(v.resolve(), "hello");
+        assert!(matches!(v.resolve(), Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn resolve_multiline() {
+        let v = AttributeValue::Multiline(vec!["hello", "world"]);
+        assert_eq!(v.resolve(), "hello world");
+    }
+
+    #[test]
+    fn resolve_multiline_legacy() {
+        let v = AttributeValue::MultilineLegacy(vec!["hello", "world"]);
+        assert_eq!(v.resolve(), "helloworld");
+    }
+
+    #[test]
+    fn resolve_resolved() {
+        let v = AttributeValue::Resolved("already done".to_string());
+        assert_eq!(v.resolve(), "already done");
+    }
+
+    // ── AttributeValue::as_str ───────────────────────────────────────
+
+    #[test]
+    fn as_str_single() {
+        let v = AttributeValue::Single("val");
+        assert_eq!(v.as_str(), Some("val"));
+    }
+
+    #[test]
+    fn as_str_multiline_returns_none() {
+        let v = AttributeValue::Multiline(vec!["a", "b"]);
+        assert_eq!(v.as_str(), None);
+    }
+
+    #[test]
+    fn as_str_multiline_legacy_returns_none() {
+        let v = AttributeValue::MultilineLegacy(vec!["a", "b"]);
+        assert_eq!(v.as_str(), None);
+    }
+
+    #[test]
+    fn as_str_resolved_returns_none() {
+        let v = AttributeValue::Resolved("x".to_string());
+        assert_eq!(v.as_str(), None);
+    }
+
+    // ── AttributeValue::is_multiline ─────────────────────────────────
+
+    #[test]
+    fn is_multiline_single() {
+        assert!(!AttributeValue::Single("x").is_multiline());
+    }
+
+    #[test]
+    fn is_multiline_multiline() {
+        assert!(AttributeValue::Multiline(vec!["a"]).is_multiline());
+    }
+
+    #[test]
+    fn is_multiline_multiline_legacy() {
+        assert!(AttributeValue::MultilineLegacy(vec!["a"]).is_multiline());
+    }
+
+    #[test]
+    fn is_multiline_resolved() {
+        assert!(!AttributeValue::Resolved("x".to_string()).is_multiline());
+    }
+
+    // ── BlockMetadata default ────────────────────────────────────────
+
+    #[test]
+    fn block_metadata_default() {
+        let m = BlockMetadata::default();
+        assert!(m.roles.is_empty());
+        assert!(m.options.is_empty());
+        assert!(m.attributes.is_empty());
+    }
+
+    // ── Block::new ───────────────────────────────────────────────────
+
+    #[test]
+    fn block_new_sets_name() {
+        let b = Block::new("paragraph");
+        assert_eq!(b.name, "paragraph");
+    }
+
+    #[test]
+    fn block_new_all_fields_none() {
+        let b = Block::new("paragraph");
+        assert!(b.form.is_none());
+        assert!(b.delimiter.is_none());
+        assert!(b.id.is_none());
+        assert!(b.style.is_none());
+        assert!(b.target.is_none());
+        assert!(b.reftext.is_none());
+        assert!(b.metadata.is_none());
+        assert!(b.title.is_none());
+        assert!(b.level.is_none());
+        assert!(b.variant.is_none());
+        assert!(b.marker.is_none());
+        assert!(b.inlines.is_none());
+        assert!(b.blocks.is_none());
+        assert!(b.items.is_none());
+        assert!(b.principal.is_none());
+        assert!(b.terms.is_none());
+        assert!(b.location.is_none());
+    }
+
+}
