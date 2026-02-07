@@ -118,10 +118,7 @@ where
 {
     // For unconstrained (**), use negative lookahead to stop before **.
     // This prevents the inner parser from consuming potential closing delimiters.
-    let not_double_star = just(Token::Star)
-        .then(just(Token::Star))
-        .not()
-        .rewind();
+    let not_double_star = just(Token::Star).then(just(Token::Star)).not().rewind();
 
     let inner_unconstrained = not_double_star
         .ignore_then(inner.clone())

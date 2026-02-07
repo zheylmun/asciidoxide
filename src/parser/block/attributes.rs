@@ -555,8 +555,7 @@ fn try_extract_titled_header<'src>(
     };
 
     // Try to parse author and revision lines
-    let (authors, new_i, new_span_end) =
-        parse_author_and_revision(tokens, i, span_end, source);
+    let (authors, new_i, new_span_end) = parse_author_and_revision(tokens, i, span_end, source);
     i = new_i;
     span_end = new_span_end;
 
@@ -743,8 +742,7 @@ pub(crate) fn extract_header<'src>(
 
         // Check for :doctitle: attribute → create header
         if attributes.contains_key("doctitle") {
-            if let Some(result) =
-                try_create_doctitle_header(tokens, next, source, idx, attributes)
+            if let Some(result) = try_create_doctitle_header(tokens, next, source, idx, attributes)
             {
                 return result;
             }

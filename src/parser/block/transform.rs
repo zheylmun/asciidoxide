@@ -396,8 +396,8 @@ fn handle_block_content<'src>(
 
     match promoted_name {
         "listing" | "literal" | "pass" | "stem" => {
-            block.inlines = handle_verbatim_content(raw.content_span, source, idx)
-                .or_else(|| Some(vec![]));
+            block.inlines =
+                handle_verbatim_content(raw.content_span, source, idx).or_else(|| Some(vec![]));
         }
 
         "paragraph" => {
