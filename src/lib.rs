@@ -6,7 +6,7 @@ pub mod diagnostic;
 mod lexer;
 mod parser;
 pub mod preprocess;
-mod span;
+pub mod span;
 mod token;
 
 use asg::{Document, InlineNode};

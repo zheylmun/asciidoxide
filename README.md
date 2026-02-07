@@ -121,9 +121,11 @@ echo '{"contents":"*bold*","path":"test","type":"inline"}' | \
 src/
 ├── lib.rs          # Library entry points: parse_document, parse_inline
 ├── asg.rs          # Abstract Semantic Graph types (Document, Block, InlineNode, etc.)
+├── diagnostic.rs   # ParseDiagnostic type for parser errors/warnings
 ├── lexer.rs        # Token definitions and lexer
 ├── parser/         # Block and inline parsers
-└── span.rs         # Source location tracking
+├── preprocess/     # Conditional directive preprocessing (ifdef, ifndef, ifeval)
+└── span.rs         # Source location tracking (SourceSpan, SourceIndex)
 
 tests/
 ├── tck.rs          # Rust integration tests against TCK fixtures
