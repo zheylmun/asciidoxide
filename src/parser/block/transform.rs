@@ -9,9 +9,9 @@ use super::raw_block::RawBlock;
 use std::borrow::Cow;
 use std::collections::HashMap;
 
-use crate::asg::{Block, BlockMetadata, InlineNode, Location, Position, TextNode};
+use crate::asg::{Block, BlockMetadata, InlineNode, TextNode};
 use crate::diagnostic::ParseDiagnostic;
-use crate::lexer::lex;
+use crate::lexer::lex_with_offset;
 use crate::parser::inline::run_inline_parser;
 use crate::span::{SourceIndex, SourceSpan};
 
@@ -22,131 +22,18 @@ use crate::span::{SourceIndex, SourceSpan};
 fn slugify(title: &str) -> String {
     let mut slug = String::with_capacity(title.len() + 1);
     slug.push('_');
+    let mut prev_underscore = true;
     for ch in title.chars() {
         if ch.is_ascii_alphanumeric() {
             slug.push(ch.to_ascii_lowercase());
-        } else {
-            slug.push('_');
-        }
-    }
-    // Collapse consecutive underscores
-    let mut collapsed = String::with_capacity(slug.len());
-    let mut prev_underscore = false;
-    for ch in slug.chars() {
-        if ch == '_' {
-            if !prev_underscore {
-                collapsed.push('_');
-            }
-            prev_underscore = true;
-        } else {
-            collapsed.push(ch);
             prev_underscore = false;
+        } else if !prev_underscore {
+            slug.push('_');
+            prev_underscore = true;
         }
     }
-    // Trim trailing underscores
-    collapsed.truncate(collapsed.trim_end_matches('_').len());
-    collapsed
-}
-
-/// Offset a location by a base position.
-///
-/// When we parse content from a substring, the resulting locations are relative
-/// to the substring's start (line 1, col 1). This function adjusts them to be
-/// relative to the original source using the byte offset of the substring.
-fn offset_location(loc: Option<Location>, base: Position) -> Option<Location> {
-    loc.map(|[start, end]| {
-        [
-            Position {
-                line: start.line + base.line - 1,
-                col: if start.line == 1 {
-                    start.col + base.col - 1
-                } else {
-                    start.col
-                },
-            },
-            Position {
-                line: end.line + base.line - 1,
-                col: if end.line == 1 {
-                    end.col + base.col - 1
-                } else {
-                    end.col
-                },
-            },
-        ]
-    })
-}
-
-/// Offset all locations in a block tree by a base position.
-fn offset_block_locations(block: &mut Block<'_>, base: Position) {
-    block.location = offset_location(block.location, base);
-
-    // Offset inlines
-    if let Some(ref mut inlines) = block.inlines {
-        for inline in inlines.iter_mut() {
-            offset_inline_location(inline, base);
-        }
-    }
-
-    // Offset title
-    if let Some(ref mut title) = block.title {
-        for inline in title.iter_mut() {
-            offset_inline_location(inline, base);
-        }
-    }
-
-    // Offset principal
-    if let Some(ref mut principal) = block.principal {
-        for inline in principal.iter_mut() {
-            offset_inline_location(inline, base);
-        }
-    }
-
-    // Offset child blocks
-    if let Some(ref mut blocks) = block.blocks {
-        for child in blocks.iter_mut() {
-            offset_block_locations(child, base);
-        }
-    }
-
-    // Offset items
-    if let Some(ref mut items) = block.items {
-        for item in items.iter_mut() {
-            offset_block_locations(item, base);
-        }
-    }
-}
-
-/// Offset a location in an inline node.
-fn offset_inline_location(inline: &mut InlineNode<'_>, base: Position) {
-    match inline {
-        InlineNode::Text(text) => {
-            text.location = offset_location(text.location, base);
-        }
-        InlineNode::Span(span) => {
-            span.location = offset_location(span.location, base);
-            for child in &mut span.inlines {
-                offset_inline_location(child, base);
-            }
-        }
-        InlineNode::Ref(r) => {
-            r.location = offset_location(r.location, base);
-            for child in &mut r.inlines {
-                offset_inline_location(child, base);
-            }
-        }
-        InlineNode::Raw(raw) => {
-            raw.location = offset_location(raw.location, base);
-        }
-    }
-}
-
-/// Get the starting position for a byte offset in the original source.
-fn get_base_position(_source: &str, idx: &SourceIndex, byte_offset: usize) -> Position {
-    let loc = idx.location(&SourceSpan {
-        start: byte_offset,
-        end: byte_offset,
-    });
-    loc[0]
+    slug.truncate(slug.trim_end_matches('_').len());
+    slug
 }
 
 /// Result of style promotion analysis.
@@ -254,26 +141,26 @@ fn analyze_style_promotion<'a>(raw: &RawBlock<'a>) -> StylePromotion<'a> {
     }
 }
 
-/// Parse a span as inlines with location adjustment.
+/// Parse a span as inlines using the full document source and index.
+///
+/// Tokens are lexed from the substring but their spans are shifted by
+/// `span.start` so that all positions are global. The parent `SourceIndex`
+/// converts these global spans directly — no post-parse offset traversal.
 fn parse_span_as_inlines<'src>(
     span: SourceSpan,
     source: &'src str,
     idx: &SourceIndex,
 ) -> (Vec<InlineNode<'src>>, Vec<ParseDiagnostic>) {
     let content = &source[span.start..span.end];
-    let tokens = lex(content);
-    let content_idx = SourceIndex::new(content);
-    let (mut inlines, diags) = run_inline_parser(&tokens, content, &content_idx);
-
-    let base = get_base_position(source, idx, span.start);
-    for inline in &mut inlines {
-        offset_inline_location(inline, base);
-    }
-
-    (inlines, diags)
+    let tokens = lex_with_offset(content, span.start);
+    run_inline_parser(&tokens, source, idx)
 }
 
-/// Parse content span as child blocks with location adjustment.
+/// Parse content span as child blocks using the full document source and index.
+///
+/// Tokens are lexed from the substring but shifted by `span.start` so all
+/// positions are global. The parent `source` and `SourceIndex` are passed
+/// through to block/inline parsers — no post-parse offset traversal.
 fn parse_span_as_blocks<'src>(
     span: SourceSpan,
     source: &'src str,
@@ -281,20 +168,14 @@ fn parse_span_as_blocks<'src>(
     id_registry: &mut HashMap<String, usize>,
 ) -> (Vec<Block<'src>>, Vec<ParseDiagnostic>) {
     let content = &source[span.start..span.end];
-    let tokens = lex(content);
-    let content_idx = SourceIndex::new(content);
-    let (raw_blocks, mut diagnostics) =
-        super::boundary::parse_raw_blocks(&tokens, content, &content_idx);
+    let tokens = lex_with_offset(content, span.start);
+    let (raw_blocks, mut diagnostics) = super::boundary::parse_raw_blocks(&tokens, source, idx);
 
-    let base = get_base_position(source, idx, span.start);
     let mut child_blocks = Vec::with_capacity(raw_blocks.len());
     for raw_child in raw_blocks {
-        let (mut children, child_diags) =
-            transform_raw_block_inner(raw_child, content, &content_idx, id_registry);
+        let (children, child_diags) =
+            transform_raw_block_inner(raw_child, source, idx, id_registry);
         diagnostics.extend(child_diags);
-        for child in &mut children {
-            offset_block_locations(child, base);
-        }
         child_blocks.extend(children);
     }
 
@@ -612,17 +493,8 @@ fn transform_discrete_section<'src>(
 
     // Parse title span as inlines
     if let Some(title_span) = raw.title_span {
-        let title_content = &source[title_span.start..title_span.end];
-        let title_tokens = lex(title_content);
-        let title_idx = SourceIndex::new(title_content);
-        let (mut title_inlines, title_diags) =
-            run_inline_parser(&title_tokens, title_content, &title_idx);
+        let (title_inlines, title_diags) = parse_span_as_inlines(title_span, source, idx);
         diagnostics.extend(title_diags);
-
-        let base = get_base_position(source, idx, title_span.start);
-        for inline in &mut title_inlines {
-            offset_inline_location(inline, base);
-        }
         heading.title = Some(title_inlines);
     }
 
@@ -630,24 +502,10 @@ fn transform_discrete_section<'src>(
 
     // Parse body content as sibling blocks (not children)
     if let Some(content_span) = raw.content_span {
-        let content = &source[content_span.start..content_span.end];
-        let content_tokens = lex(content);
-        let content_idx = SourceIndex::new(content);
-        let (raw_blocks, block_diags) =
-            super::boundary::parse_raw_blocks(&content_tokens, content, &content_idx);
+        let (child_blocks, block_diags) =
+            parse_span_as_blocks(content_span, source, idx, id_registry);
         diagnostics.extend(block_diags);
-
-        // Transform and add as siblings
-        let base = get_base_position(source, idx, content_span.start);
-        for raw_child in raw_blocks {
-            let (mut child_blocks, child_diags) =
-                transform_raw_block_inner(raw_child, content, &content_idx, id_registry);
-            diagnostics.extend(child_diags);
-            for child in &mut child_blocks {
-                offset_block_locations(child, base);
-            }
-            result_blocks.extend(child_blocks);
-        }
+        result_blocks.extend(child_blocks);
     }
 
     (result_blocks, diagnostics)
@@ -675,6 +533,7 @@ pub(super) fn transform_raw_blocks<'src>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lexer::lex;
     use crate::span::SourceIndex;
 
     #[test]

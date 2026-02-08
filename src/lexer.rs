@@ -28,6 +28,21 @@ pub fn lex(input: &str) -> Vec<Spanned<'_>> {
         .expect("infallible lexer produced no output")
 }
 
+/// Lex a substring and shift all span offsets by `base_offset`.
+///
+/// This produces tokens whose spans are relative to the full document source
+/// rather than the substring, eliminating the need for a post-parse offset
+/// traversal.
+#[must_use]
+pub fn lex_with_offset(input: &str, base_offset: usize) -> Vec<Spanned<'_>> {
+    let mut tokens = lex(input);
+    for (_, span) in &mut tokens {
+        span.start += base_offset;
+        span.end += base_offset;
+    }
+    tokens
+}
+
 /// Build the chumsky lexer parser.
 fn lexer<'src>() -> impl Parser<'src, &'src str, Vec<(Token<'src>, SourceSpan)>, extra::Default> {
     let newline = text::newline().to(Token::Newline);
