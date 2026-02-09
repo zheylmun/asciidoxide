@@ -328,34 +328,48 @@ pub(super) fn run_inline_parser<'tokens, 'src: 'tokens>(
 /// This function merges them into a single `TextNode` whose value is a single
 /// slice of the source and whose location spans the full range.
 ///
-/// Span nodes have their `inlines` recursively merged.
-fn merge_text_nodes<'a>(nodes: Vec<InlineNode<'a>>, source: &'a str) -> Vec<InlineNode<'a>> {
+/// Span and ref nodes have their `inlines` recursively merged.
+///
+/// Operates in-place using a write-cursor, avoiding a second allocation.
+fn merge_text_nodes<'a>(mut nodes: Vec<InlineNode<'a>>, source: &'a str) -> Vec<InlineNode<'a>> {
     let source_base = source.as_ptr() as usize;
-    let mut result: Vec<InlineNode<'a>> = Vec::with_capacity(nodes.len());
 
-    for node in nodes {
-        // Recursively merge inside span and ref nodes.
-        let node = match node {
-            InlineNode::Span(mut s) => {
-                s.inlines = merge_text_nodes(s.inlines, source);
-                InlineNode::Span(s)
+    // Recursively merge children of span/ref nodes first.
+    for node in &mut nodes {
+        match node {
+            InlineNode::Span(s) => {
+                let inlines = std::mem::take(&mut s.inlines);
+                s.inlines = merge_text_nodes(inlines, source);
             }
-            InlineNode::Ref(mut r) => {
-                r.inlines = merge_text_nodes(r.inlines, source);
-                InlineNode::Ref(r)
+            InlineNode::Ref(r) => {
+                let inlines = std::mem::take(&mut r.inlines);
+                r.inlines = merge_text_nodes(inlines, source);
             }
-            InlineNode::Text(t) => InlineNode::Text(t),
-            InlineNode::Raw(r) => InlineNode::Raw(r),
-        };
+            InlineNode::Text(_) | InlineNode::Raw(_) => {}
+        }
+    }
 
-        // Try to merge with the previous text node if values are contiguous.
-        let merged = if let InlineNode::Text(curr) = &node {
-            if let Some(InlineNode::Text(prev)) = result.last_mut() {
-                let prev_offset = prev.value.as_ptr() as usize - source_base;
-                let curr_offset = curr.value.as_ptr() as usize - source_base;
-                if prev_offset + prev.value.len() == curr_offset {
-                    prev.value = &source[prev_offset..curr_offset + curr.value.len()];
-                    if let (Some(prev_loc), Some(curr_loc)) = (&mut prev.location, &curr.location) {
+    // In-place merge pass using a write cursor.
+    let len = nodes.len();
+    if len <= 1 {
+        return nodes;
+    }
+
+    let mut write = 1;
+    for read in 1..len {
+        // Check if nodes[read] can merge into nodes[write-1].
+        let merged = {
+            let (left, right) = nodes.split_at_mut(read);
+            let prev = &mut left[write - 1];
+            let curr = &right[0];
+            if let (InlineNode::Text(prev_t), InlineNode::Text(curr_t)) = (prev, curr) {
+                let prev_offset = prev_t.value.as_ptr() as usize - source_base;
+                let curr_offset = curr_t.value.as_ptr() as usize - source_base;
+                if prev_offset + prev_t.value.len() == curr_offset {
+                    prev_t.value = &source[prev_offset..curr_offset + curr_t.value.len()];
+                    if let (Some(prev_loc), Some(curr_loc)) =
+                        (&mut prev_t.location, &curr_t.location)
+                    {
                         prev_loc[1] = curr_loc[1];
                     }
                     true
@@ -365,16 +379,18 @@ fn merge_text_nodes<'a>(nodes: Vec<InlineNode<'a>>, source: &'a str) -> Vec<Inli
             } else {
                 false
             }
-        } else {
-            false
         };
 
         if !merged {
-            result.push(node);
+            if write != read {
+                nodes.swap(write, read);
+            }
+            write += 1;
         }
     }
 
-    result
+    nodes.truncate(write);
+    nodes
 }
 
 // ---------------------------------------------------------------------------
