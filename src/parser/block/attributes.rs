@@ -1,13 +1,24 @@
 //! Document header and attribute parsing.
+//!
+//! Token-level parsing uses chumsky combinators (`custom()` for complex
+//! patterns, declarative combinators for simple ones), matching the style
+//! used throughout the rest of the block parser.
 
 use std::collections::HashMap;
 
+use chumsky::{input::ValueInput, prelude::*};
+
 use super::super::inline::run_inline_parser;
 use super::Spanned;
+use super::boundary::utility::BlockExtra;
 use crate::asg::{AttributeValue, Author, Header};
 use crate::diagnostic::ParseDiagnostic;
 use crate::span::{SourceIndex, SourceSpan};
 use crate::token::Token;
+
+// ---------------------------------------------------------------------------
+// String-level helpers (unchanged)
+// ---------------------------------------------------------------------------
 
 /// Substitute `{name}` attribute references in a value string.
 ///
@@ -60,17 +71,6 @@ fn resolve_attr_refs<'src>(
     }
 }
 
-/// Result of header extraction from the token stream.
-pub(crate) struct HeaderResult<'src> {
-    pub(crate) header: Option<Header<'src>>,
-    /// Index of the first body token (past the header and its attributes).
-    pub(crate) body_start: usize,
-    pub(crate) diagnostics: Vec<ParseDiagnostic>,
-    /// Document attributes parsed from `:key: value` lines below the title.
-    /// `Some` when a header is present (even if no attribute entries exist).
-    pub(crate) attributes: Option<HashMap<&'src str, AttributeValue<'src>>>,
-}
-
 /// Check if an attribute name is valid per the `AsciiDoc` spec.
 ///
 /// Valid names match: `^[a-zA-Z0-9_][-a-zA-Z0-9_]*$`
@@ -81,362 +81,6 @@ fn is_valid_attribute_name(name: &str) -> bool {
         _ => return false,
     }
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-}
-
-/// Result of parsing an attribute entry.
-enum AttributeEntry<'src> {
-    /// Set an attribute: `:key: value`
-    Set {
-        key: &'src str,
-        value: AttributeValue<'src>,
-    },
-    /// Delete an attribute: `:!key:` or `:key!:`
-    Delete { key: &'src str },
-}
-
-/// Parse a multiline attribute value with backslash continuation.
-///
-/// `val_start` is the index of the first value token.
-/// `line_end` is the index of the Newline token (or end of tokens).
-/// Returns the parsed segments and the token index to continue from.
-///
-/// Backslash continuation trims trailing whitespace and joins with spaces.
-fn parse_backslash_multiline<'src>(
-    tokens: &[Spanned<'src>],
-    val_start: usize,
-    line_end: usize,
-    source: &'src str,
-) -> (Vec<&'src str>, usize) {
-    let mut segments: Vec<&'src str> = Vec::new();
-
-    // Extract first segment (before the backslash).
-    let seg_end = line_end - 1; // Exclude the backslash
-    if val_start < seg_end {
-        let start = tokens[val_start].1.start;
-        let end = tokens[seg_end - 1].1.end;
-        let segment = &source[start..end];
-        // Trim trailing whitespace before backslash.
-        segments.push(segment.trim_end());
-    }
-
-    // Advance past newline to continuation line.
-    let mut pos = if line_end < tokens.len() {
-        line_end + 1
-    } else {
-        line_end
-    };
-
-    // Read continuation lines.
-    while pos < tokens.len() {
-        // Skip leading whitespace on continuation line.
-        if matches!(tokens[pos].0, Token::Whitespace) {
-            pos += 1;
-        }
-
-        // Find end of this line.
-        let cont_start = pos;
-        while pos < tokens.len() && !matches!(tokens[pos].0, Token::Newline) {
-            pos += 1;
-        }
-
-        // Check if this line also has continuation.
-        let line_has_continuation =
-            pos > cont_start && matches!(tokens[pos - 1].0, Token::Backslash);
-
-        if line_has_continuation {
-            // Extract segment before backslash.
-            let seg_end = pos - 1;
-            if cont_start < seg_end {
-                let start = tokens[cont_start].1.start;
-                let end = tokens[seg_end - 1].1.end;
-                let segment = &source[start..end];
-                segments.push(segment.trim_end());
-            }
-            // Advance past newline.
-            if pos < tokens.len() {
-                pos += 1;
-            }
-        } else {
-            // Final line (no continuation).
-            if cont_start < pos {
-                let start = tokens[cont_start].1.start;
-                let end = tokens[pos - 1].1.end;
-                segments.push(&source[start..end]);
-            }
-            // Advance past newline if present.
-            if pos < tokens.len() {
-                pos += 1;
-            }
-            break;
-        }
-    }
-
-    (segments, pos)
-}
-
-/// Parse a multiline attribute value with legacy `+` continuation.
-///
-/// `val_start` is the index of the first value token.
-/// `line_end` is the index of the Newline token (or end of tokens).
-/// Returns the parsed segments and the token index to continue from.
-///
-/// Legacy `+` continuation preserves trailing whitespace and concatenates directly.
-fn parse_legacy_plus_multiline<'src>(
-    tokens: &[Spanned<'src>],
-    val_start: usize,
-    line_end: usize,
-    source: &'src str,
-) -> (Vec<&'src str>, usize) {
-    let mut segments: Vec<&'src str> = Vec::new();
-
-    // Extract first segment (before the +).
-    // Preserve trailing whitespace before the `+`.
-    let seg_end = line_end - 1; // Exclude the `+`
-    if val_start < seg_end {
-        let start = tokens[val_start].1.start;
-        let end = tokens[seg_end - 1].1.end;
-        segments.push(&source[start..end]);
-    }
-
-    // Advance past newline to continuation line.
-    let mut pos = if line_end < tokens.len() {
-        line_end + 1
-    } else {
-        line_end
-    };
-
-    // Read continuation lines.
-    while pos < tokens.len() {
-        // Skip leading whitespace on continuation line.
-        if matches!(tokens[pos].0, Token::Whitespace) {
-            pos += 1;
-        }
-
-        // Find end of this line.
-        let cont_start = pos;
-        while pos < tokens.len() && !matches!(tokens[pos].0, Token::Newline) {
-            pos += 1;
-        }
-
-        // Check if this line also has `+` continuation.
-        let line_has_continuation = pos > cont_start && matches!(tokens[pos - 1].0, Token::Plus);
-
-        if line_has_continuation {
-            // Extract segment before `+`, preserving trailing whitespace.
-            let seg_end = pos - 1;
-            if cont_start < seg_end {
-                let start = tokens[cont_start].1.start;
-                let end = tokens[seg_end - 1].1.end;
-                segments.push(&source[start..end]);
-            }
-            // Advance past newline.
-            if pos < tokens.len() {
-                pos += 1;
-            }
-        } else {
-            // Final line (no continuation).
-            if cont_start < pos {
-                let start = tokens[cont_start].1.start;
-                let end = tokens[pos - 1].1.end;
-                segments.push(&source[start..end]);
-            }
-            // Advance past newline if present.
-            if pos < tokens.len() {
-                pos += 1;
-            }
-            break;
-        }
-    }
-
-    (segments, pos)
-}
-
-/// Consume an attribute name starting at token index `start`.
-///
-/// Attribute names may contain hyphens and underscores, which the lexer
-/// tokenizes as separate `Hyphen`/`Underscore` tokens. This function
-/// consumes `Text` tokens interleaved with `Hyphen`/`Underscore` tokens
-/// and returns the full name as a source slice.
-///
-/// Returns `Some((key_slice, next_index))` where `next_index` is the
-/// token after the last consumed name token.
-fn consume_attribute_name<'src>(
-    tokens: &[Spanned<'src>],
-    start: usize,
-    source: &'src str,
-) -> Option<(&'src str, usize)> {
-    // Must start with a Text token.
-    if start >= tokens.len() {
-        return None;
-    }
-    if !matches!(tokens[start].0, Token::Text(_)) {
-        return None;
-    }
-
-    let span_start = tokens[start].1.start;
-    let mut pos = start + 1;
-
-    // Continue consuming Hyphen/Underscore followed by Text.
-    while pos + 1 < tokens.len()
-        && matches!(tokens[pos].0, Token::Hyphen | Token::Underscore)
-        && matches!(tokens[pos + 1].0, Token::Text(_))
-    {
-        pos += 2;
-    }
-
-    let span_end = tokens[pos - 1].1.end;
-    let key = &source[span_start..span_end];
-    if !is_valid_attribute_name(key) {
-        return None;
-    }
-    Some((key, pos))
-}
-
-/// Try to skip a line comment (`// ...`) at position `i`.
-///
-/// Returns the token index after the comment (past the newline) if a
-/// comment was found, or `None` if the tokens at `i` are not a comment.
-fn try_skip_line_comment(tokens: &[Spanned<'_>], i: usize) -> Option<usize> {
-    if i + 1 < tokens.len()
-        && matches!(tokens[i].0, Token::Slash)
-        && matches!(tokens[i + 1].0, Token::Slash)
-    {
-        let mut pos = i + 2;
-        while pos < tokens.len() && !matches!(tokens[pos].0, Token::Newline) {
-            pos += 1;
-        }
-        // Skip the newline itself.
-        if pos < tokens.len() {
-            pos += 1;
-        }
-        Some(pos)
-    } else {
-        None
-    }
-}
-
-/// Try to parse a single attribute entry at position `i`.
-///
-/// Patterns:
-/// - `:key: value` — set attribute
-/// - `:key:` — set attribute to empty string
-/// - `:!key:` — delete attribute (bang prefix)
-/// - `:key!:` — delete attribute (bang suffix)
-///
-/// Returns `Some((entry, next_index))` on success.
-fn try_parse_attribute_entry<'src>(
-    tokens: &[Spanned<'src>],
-    i: usize,
-    source: &'src str,
-) -> Option<(AttributeEntry<'src>, usize)> {
-    if i + 2 >= tokens.len() {
-        return None;
-    }
-    if !matches!(tokens[i].0, Token::Colon) {
-        return None;
-    }
-
-    // Check for bang-prefix deletion: `:!key:`
-    let (key, is_delete, key_end) = if matches!(tokens[i + 1].0, Token::Bang) {
-        // Need at least 4 tokens: Colon Bang <name...> Colon
-        if i + 3 >= tokens.len() {
-            return None;
-        }
-        let (key, after_name) = consume_attribute_name(tokens, i + 2, source)?;
-        if after_name >= tokens.len() || !matches!(tokens[after_name].0, Token::Colon) {
-            return None;
-        }
-        (key, true, after_name + 1)
-    } else {
-        // Regular or bang-suffix: `:key:` or `:key!:`
-        let (key, after_name) = consume_attribute_name(tokens, i + 1, source)?;
-
-        // Check for bang-suffix: `:key!:`
-        if after_name < tokens.len() && matches!(tokens[after_name].0, Token::Bang) {
-            if after_name + 1 >= tokens.len()
-                || !matches!(tokens[after_name + 1].0, Token::Colon)
-            {
-                return None;
-            }
-            (key, true, after_name + 2)
-        } else if after_name < tokens.len() && matches!(tokens[after_name].0, Token::Colon) {
-            (key, false, after_name + 1)
-        } else {
-            return None;
-        }
-    };
-
-    // For deletions, just need to reach end of line
-    if is_delete {
-        // Must be followed by Newline or end-of-tokens
-        if key_end < tokens.len() && !matches!(tokens[key_end].0, Token::Newline) {
-            return None;
-        }
-        let next = if key_end < tokens.len() {
-            key_end + 1
-        } else {
-            key_end
-        };
-        return Some((AttributeEntry::Delete { key }, next));
-    }
-
-    // After the second colon, must have:
-    // - Newline or end-of-tokens (empty value)
-    // - Whitespace followed by value
-    let after_colon = key_end;
-    if after_colon < tokens.len()
-        && !matches!(tokens[after_colon].0, Token::Newline)
-        && !matches!(tokens[after_colon].0, Token::Whitespace)
-    {
-        // Something other than whitespace/newline immediately after colon - not valid.
-        return None;
-    }
-
-    // Skip optional whitespace after second colon.
-    let mut val_start = after_colon;
-    if val_start < tokens.len() && matches!(tokens[val_start].0, Token::Whitespace) {
-        val_start += 1;
-    }
-
-    // Scan to Newline or end-of-tokens, collecting multiline segments if needed.
-    let mut line_end = val_start;
-    while line_end < tokens.len() && !matches!(tokens[line_end].0, Token::Newline) {
-        line_end += 1;
-    }
-
-    // Check if line ends with backslash (continuation) or `+` (legacy continuation).
-    let has_backslash_continuation =
-        line_end > val_start && matches!(tokens[line_end - 1].0, Token::Backslash);
-    let has_plus_continuation =
-        line_end > val_start && matches!(tokens[line_end - 1].0, Token::Plus);
-
-    if has_backslash_continuation {
-        let (segments, pos) = parse_backslash_multiline(tokens, val_start, line_end, source);
-        let value = AttributeValue::Multiline(segments);
-        Some((AttributeEntry::Set { key, value }, pos))
-    } else if has_plus_continuation {
-        let (segments, pos) = parse_legacy_plus_multiline(tokens, val_start, line_end, source);
-        let value = AttributeValue::MultilineLegacy(segments);
-        Some((AttributeEntry::Set { key, value }, pos))
-    } else {
-        // Single-line attribute value.
-        let value = if val_start < line_end {
-            let start = tokens[val_start].1.start;
-            let end = tokens[line_end - 1].1.end;
-            AttributeValue::Single(&source[start..end])
-        } else {
-            AttributeValue::Single("")
-        };
-
-        // Advance past Newline (if present).
-        let next = if line_end < tokens.len() {
-            line_end + 1
-        } else {
-            line_end
-        };
-
-        Some((AttributeEntry::Set { key, value }, next))
-    }
 }
 
 /// Parse a single author from a string like `"Doc Writer"` or `"Doc Writer <email>"`.
@@ -492,16 +136,6 @@ fn parse_authors(line: &str) -> Vec<Author<'_>> {
     line.split(';').filter_map(parse_single_author).collect()
 }
 
-/// Check if a line looks like an author line (not an attribute entry, not empty,
-/// not a heading, not a block delimiter).
-fn is_author_line(tokens: &[Spanned<'_>], pos: usize) -> bool {
-    if pos >= tokens.len() {
-        return false;
-    }
-    // Must not start with `:` (attribute entry) or `=` (heading) or be a newline (blank)
-    !matches!(tokens[pos].0, Token::Colon | Token::Eq | Token::Newline)
-}
-
 /// Check if a line looks like a revision line.
 ///
 /// A revision line starts with `v` followed by a digit, or starts with a digit
@@ -517,6 +151,33 @@ fn is_revision_line(line: &str) -> bool {
     }
     // Starts with digit (date)
     trimmed.as_bytes()[0].is_ascii_digit()
+}
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+/// Result of header extraction from the token stream.
+pub(crate) struct HeaderResult<'src> {
+    pub(crate) header: Option<Header<'src>>,
+    /// Index of the first body token (past the header and its attributes).
+    pub(crate) body_start: usize,
+    pub(crate) diagnostics: Vec<ParseDiagnostic>,
+    /// Document attributes parsed from `:key: value` lines below the title.
+    /// `Some` when a header is present (even if no attribute entries exist).
+    pub(crate) attributes: Option<HashMap<&'src str, AttributeValue<'src>>>,
+}
+
+/// Result of parsing an attribute entry.
+#[derive(Clone)]
+enum AttributeEntry<'src> {
+    /// Set an attribute: `:key: value`
+    Set {
+        key: &'src str,
+        value: AttributeValue<'src>,
+    },
+    /// Delete an attribute: `:!key:` or `:key!:`
+    Delete { key: &'src str },
 }
 
 /// Apply an attribute entry to the attributes map.
@@ -535,186 +196,622 @@ fn apply_attribute_entry<'src>(
     }
 }
 
-/// Parse all attribute entries starting from a given token index.
+// ---------------------------------------------------------------------------
+// Chumsky helper functions for use inside `custom()` parsers
+// ---------------------------------------------------------------------------
+
+/// Parse the attribute name imperatively from an `InputRef`.
 ///
-/// Returns the final token index after all entries are consumed.
-fn parse_all_attribute_entries<'src>(
-    tokens: &[Spanned<'src>],
-    mut i: usize,
+/// This is called from within `custom()` parsers.
+fn parse_attr_name<'tokens, 'src: 'tokens, I>(
+    inp: &mut chumsky::input::InputRef<'tokens, '_, I, BlockExtra<'tokens, 'src>>,
     source: &'src str,
-    attributes: &mut HashMap<&'src str, AttributeValue<'src>>,
-) -> usize {
-    loop {
-        // Skip line comments between attribute entries.
-        if let Some(after_comment) = try_skip_line_comment(tokens, i) {
-            i = after_comment;
-            continue;
-        }
-        if let Some((entry, next)) = try_parse_attribute_entry(tokens, i, source) {
-            apply_attribute_entry(entry, attributes);
-            i = next;
+) -> Result<&'src str, ()>
+where
+    I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
+{
+    let start_cursor = inp.cursor();
+
+    // Must start with Text.
+    if !matches!(inp.peek(), Some(Token::Text(_))) {
+        return Err(());
+    }
+    inp.skip();
+
+    // Continue consuming separator + Text pairs.
+    while let Some(Token::Hyphen | Token::Underscore) = inp.peek() {
+        let before = inp.save();
+        inp.skip();
+        if matches!(inp.peek(), Some(Token::Text(_))) {
+            inp.skip();
         } else {
+            inp.rewind(before);
             break;
         }
     }
-    i
-}
 
-/// Skip block attribute lines (e.g., `[glossary]`) at the start of tokens.
-fn skip_block_attribute_lines(tokens: &[Spanned<'_>]) -> usize {
-    let mut i = 0;
-    while i < tokens.len() && matches!(tokens[i].0, Token::LBracket) {
-        // Skip to end of line
-        while i < tokens.len() && !matches!(tokens[i].0, Token::Newline) {
-            i += 1;
-        }
-        // Skip newline
-        if i < tokens.len() {
-            i += 1;
-        }
-    }
-    i
-}
-
-/// Try to extract a titled header (`= Title`) starting at `start_idx`.
-///
-/// Returns `Some(HeaderResult)` if a valid title is found, `None` otherwise.
-fn try_extract_titled_header<'src>(
-    tokens: &[Spanned<'src>],
-    start_idx: usize,
-    source: &'src str,
-    idx: &SourceIndex,
-) -> Option<HeaderResult<'src>> {
-    // Check for titled document: Eq Whitespace <content>
-    if start_idx + 2 >= tokens.len()
-        || !matches!(tokens[start_idx].0, Token::Eq)
-        || !matches!(tokens[start_idx + 1].0, Token::Whitespace)
-    {
-        return None;
-    }
-
-    // Find the Newline (or end-of-tokens) that terminates the title line.
-    let title_start = start_idx + 2;
-    let mut title_end = title_start;
-    while title_end < tokens.len() && !matches!(tokens[title_end].0, Token::Newline) {
-        title_end += 1;
-    }
-
-    if title_start >= title_end {
-        return None;
-    }
-
-    let title_tokens = &tokens[title_start..title_end];
-    let (title_inlines, diagnostics) = run_inline_parser(title_tokens, source, idx);
-
-    let header_start = tokens[start_idx].1.start;
-    let mut span_end = tokens[title_end - 1].1.end;
-
-    // Advance past the title's terminating Newline (if present).
-    let mut i = if title_end < tokens.len() {
-        title_end + 1
+    let span: SourceSpan = inp.span_since(&start_cursor);
+    let key = &source[span.start..span.end];
+    if is_valid_attribute_name(key) {
+        Ok(key)
     } else {
-        title_end
-    };
+        Err(())
+    }
+}
 
-    // Try to parse author and revision lines
-    let (authors, new_i, new_span_end) = parse_author_and_revision(tokens, i, span_end, source);
-    i = new_i;
-    span_end = new_span_end;
+/// Collect multiline continuation segments.
+///
+/// `is_backslash` controls trimming behaviour:
+/// - `true`: backslash continuation — trim trailing whitespace, join with spaces.
+/// - `false`: legacy `+` continuation — preserve trailing whitespace, concatenate.
+fn collect_multiline_segments<'tokens, 'src: 'tokens, I>(
+    inp: &mut chumsky::input::InputRef<'tokens, '_, I, BlockExtra<'tokens, 'src>>,
+    source: &'src str,
+    first_val_start: usize,
+    first_line_end: usize,
+    is_backslash: bool,
+) -> Vec<&'src str>
+where
+    I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
+{
+    let mut segments: Vec<&'src str> = Vec::new();
 
-    // Parse attribute entry lines, skipping line comments.
-    // When there's no author/revision, attribute entries extend the header span.
-    let mut attributes = HashMap::new();
+    // First segment: everything before the continuation marker.
+    // The continuation marker is the last token on the line, so we need to
+    // find where the content before it ends. We look backwards from `first_line_end`
+    // for the marker (1 byte for `\` or `+`).
+    let marker_byte = if is_backslash { b'\\' } else { b'+' };
+    let mut content_end = first_line_end;
+    // Walk backwards past the marker character.
+    while content_end > first_val_start && source.as_bytes()[content_end - 1] == marker_byte {
+        content_end -= 1;
+    }
+
+    if first_val_start < content_end {
+        let seg = &source[first_val_start..content_end];
+        segments.push(if is_backslash { seg.trim_end() } else { seg });
+    }
+
+    // Consume newline after the continuation marker.
+    if matches!(inp.peek(), Some(Token::Newline)) {
+        inp.skip();
+    }
+
+    // Read continuation lines.
     loop {
-        // Skip line comments between attribute entries.
-        if let Some(after_comment) = try_skip_line_comment(tokens, i) {
-            i = after_comment;
-            continue;
+        // Skip leading whitespace.
+        if matches!(inp.peek(), Some(Token::Whitespace)) {
+            inp.skip();
         }
-        if let Some((entry, next)) = try_parse_attribute_entry(tokens, i, source) {
-            if authors.is_none() {
-                // Extend header span to include attribute entries
-                span_end = tokens[next - 1].1.end;
-                if next > 0 && matches!(tokens[next - 1].0, Token::Newline) {
-                    span_end = tokens[next - 2].1.end;
-                }
+
+        // Capture line start.
+        let line_cursor = inp.cursor();
+        let line_span: SourceSpan = inp.span_since(&line_cursor);
+        let line_byte_start = line_span.start;
+        let mut line_last_end = line_byte_start;
+        let mut line_last_token: Option<Token<'src>> = None;
+        let mut line_empty = true;
+
+        while inp.peek().is_some() && !matches!(inp.peek(), Some(Token::Newline)) {
+            let before = inp.cursor();
+            let tok = inp.next().unwrap();
+            let span: SourceSpan = inp.span_since(&before);
+            line_last_end = span.end;
+            line_last_token = Some(tok);
+            line_empty = false;
+        }
+
+        if line_empty {
+            // Empty continuation line — stop.
+            if matches!(inp.peek(), Some(Token::Newline)) {
+                inp.skip();
             }
-            apply_attribute_entry(entry, &mut attributes);
-            i = next;
+            break;
+        }
+
+        let cont_marker = if is_backslash {
+            matches!(line_last_token, Some(Token::Backslash))
         } else {
+            matches!(line_last_token, Some(Token::Plus))
+        };
+
+        if cont_marker {
+            // Extract segment before marker.
+            let mut seg_end = line_last_end;
+            while seg_end > line_byte_start && source.as_bytes()[seg_end - 1] == marker_byte {
+                seg_end -= 1;
+            }
+            if line_byte_start < seg_end {
+                let seg = &source[line_byte_start..seg_end];
+                segments.push(if is_backslash { seg.trim_end() } else { seg });
+            }
+            // Consume newline.
+            if matches!(inp.peek(), Some(Token::Newline)) {
+                inp.skip();
+            }
+        } else {
+            // Final line.
+            if line_byte_start < line_last_end {
+                segments.push(&source[line_byte_start..line_last_end]);
+            }
+            if matches!(inp.peek(), Some(Token::Newline)) {
+                inp.skip();
+            }
             break;
         }
     }
 
-    let header_span = SourceSpan {
-        start: header_start,
-        end: span_end,
+    segments
+}
+
+/// Consume all tokens until newline/EOI and return `(byte_start, byte_end)`.
+///
+/// Returns `None` if the line is empty (no content tokens before newline).
+fn consume_line_bytes<'tokens, 'src: 'tokens, I>(
+    inp: &mut chumsky::input::InputRef<'tokens, '_, I, BlockExtra<'tokens, 'src>>,
+) -> Option<(usize, usize)>
+where
+    I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
+{
+    let cursor = inp.cursor();
+    let start_span: SourceSpan = inp.span_since(&cursor);
+    let byte_start = start_span.start;
+    let mut byte_end = byte_start;
+
+    while inp.peek().is_some() && !matches!(inp.peek(), Some(Token::Newline)) {
+        let before = inp.cursor();
+        inp.skip();
+        let s: SourceSpan = inp.span_since(&before);
+        byte_end = s.end;
+    }
+
+    if byte_start < byte_end {
+        Some((byte_start, byte_end))
+    } else {
+        None
+    }
+}
+
+/// Try to parse author and revision lines after the title.
+///
+/// Returns `(authors, span_end)` where `span_end` is updated if authors/revision
+/// were found.
+fn try_parse_author_revision<'tokens, 'src: 'tokens, I>(
+    inp: &mut chumsky::input::InputRef<'tokens, '_, I, BlockExtra<'tokens, 'src>>,
+    source: &'src str,
+    current_span_end: usize,
+) -> (Option<Vec<Author<'src>>>, usize)
+where
+    I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
+{
+    // Don't attempt if next token can't start an author line.
+    if matches!(
+        inp.peek(),
+        None | Some(Token::Colon | Token::Eq | Token::Newline)
+    ) {
+        return (None, current_span_end);
+    }
+
+    let mut span_end = current_span_end;
+    let author_save = inp.save();
+
+    let Some((line_start, line_end)) = consume_line_bytes(inp) else {
+        inp.rewind(author_save);
+        return (None, span_end);
     };
 
-    let header = Header {
-        title: title_inlines,
-        authors,
-        location: Some(idx.location(&header_span)),
-    };
+    let author_text = &source[line_start..line_end];
+    let parsed = parse_authors(author_text);
 
-    Some(HeaderResult {
-        header: Some(header),
-        body_start: i,
-        diagnostics,
-        attributes: Some(attributes),
+    if parsed.is_empty() {
+        inp.rewind(author_save);
+        return (None, span_end);
+    }
+
+    span_end = line_end;
+
+    // Consume trailing newline after author line.
+    if matches!(inp.peek(), Some(Token::Newline)) {
+        inp.skip();
+    }
+
+    // Try revision line.
+    if inp.peek().is_some() && !matches!(inp.peek(), Some(Token::Colon | Token::Newline)) {
+        let rev_save = inp.save();
+        if let Some((rev_start, rev_end)) = consume_line_bytes(inp) {
+            let rev_text = &source[rev_start..rev_end];
+            if is_revision_line(rev_text) {
+                span_end = rev_end;
+                if matches!(inp.peek(), Some(Token::Newline)) {
+                    inp.skip();
+                }
+            } else {
+                inp.rewind(rev_save);
+            }
+        }
+    }
+
+    (Some(parsed), span_end)
+}
+
+// ---------------------------------------------------------------------------
+// Top-level header parsers
+// ---------------------------------------------------------------------------
+
+/// Parse a titled header: `= Title\n` followed by optional author/revision
+/// and attribute entries.
+fn titled_header<'tokens, 'src: 'tokens, I>(
+    tokens: &'tokens [Spanned<'src>],
+    source: &'src str,
+    idx: &'tokens SourceIndex,
+) -> impl Parser<'tokens, I, HeaderResult<'src>, BlockExtra<'tokens, 'src>>
+where
+    I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
+{
+    custom(move |inp| {
+        let start_cursor = inp.cursor();
+
+        // Skip block attribute lines (`[...]`).
+        while matches!(inp.peek(), Some(Token::LBracket)) {
+            while inp.peek().is_some() && !matches!(inp.peek(), Some(Token::Newline)) {
+                inp.skip();
+            }
+            if matches!(inp.peek(), Some(Token::Newline)) {
+                inp.skip();
+            }
+        }
+
+        // Must start with `= ` (single Eq followed by Whitespace).
+        if !matches!(inp.peek(), Some(Token::Eq)) {
+            return Err(Rich::custom(
+                inp.span_since(&start_cursor),
+                "expected '=' for title",
+            ));
+        }
+        let eq_cursor = inp.cursor();
+        inp.skip(); // consume `=`
+
+        if !matches!(inp.peek(), Some(Token::Whitespace)) {
+            return Err(Rich::custom(
+                inp.span_since(&start_cursor),
+                "expected whitespace after '='",
+            ));
+        }
+        inp.skip(); // consume whitespace
+
+        // Read title content until newline/EOI.
+        let Some((title_byte_start, title_byte_end)) = consume_line_bytes(inp) else {
+            return Err(Rich::custom(inp.span_since(&start_cursor), "empty title"));
+        };
+
+        // Extract title tokens from the original slice for inline parsing.
+        let eq_span: SourceSpan = inp.span_since(&eq_cursor);
+        let header_byte_start = eq_span.start;
+
+        let title_token_start = tokens
+            .iter()
+            .position(|t| t.1.start >= title_byte_start)
+            .unwrap_or(tokens.len());
+        let title_token_end = tokens
+            .iter()
+            .position(|t| t.1.start >= title_byte_end)
+            .unwrap_or(tokens.len());
+        let title_tokens = &tokens[title_token_start..title_token_end];
+        let (title_inlines, diagnostics) = run_inline_parser(title_tokens, source, idx);
+
+        let mut span_end = title_byte_end;
+
+        // Consume trailing newline.
+        if matches!(inp.peek(), Some(Token::Newline)) {
+            inp.skip();
+        }
+
+        // Try to parse author/revision lines.
+        let (authors, new_span_end) = try_parse_author_revision(inp, source, span_end);
+        span_end = new_span_end;
+
+        // Parse attribute entries and line comments.
+        let mut attributes = HashMap::new();
+        let attr_cursor = inp.cursor();
+        parse_attr_entries_loop(inp, source, &mut attributes);
+
+        // When no authors, extend header span to cover attribute entries.
+        if authors.is_none() {
+            let attr_span: SourceSpan = inp.span_since(&attr_cursor);
+            let mut entry_end = attr_span.end;
+            if entry_end > 0 && source.as_bytes().get(entry_end - 1) == Some(&b'\n') {
+                entry_end -= 1;
+            }
+            if entry_end > span_end {
+                span_end = entry_end;
+            }
+        }
+
+        // Compute body_start as a token index.
+        let consumed_span: SourceSpan = inp.span_since(&start_cursor);
+        let body_start = tokens
+            .iter()
+            .position(|t| t.1.start >= consumed_span.end)
+            .unwrap_or(tokens.len());
+
+        let header_span = SourceSpan {
+            start: header_byte_start,
+            end: span_end,
+        };
+
+        let header = Header {
+            title: title_inlines,
+            authors,
+            location: Some(idx.location(&header_span)),
+        };
+
+        Ok(HeaderResult {
+            header: Some(header),
+            body_start,
+            diagnostics,
+            attributes: Some(attributes),
+        })
     })
 }
 
-/// Parse author line and optional revision line following a title.
-///
-/// Returns `(authors, next_token_index, span_end)`.
-fn parse_author_and_revision<'src>(
-    tokens: &[Spanned<'src>],
-    mut i: usize,
-    mut span_end: usize,
+/// Parse attribute value imperatively (called from within `custom()` body).
+fn parse_attribute_value_imperative<'tokens, 'src: 'tokens, I>(
+    inp: &mut chumsky::input::InputRef<'tokens, '_, I, BlockExtra<'tokens, 'src>>,
     source: &'src str,
-) -> (Option<Vec<Author<'src>>>, usize, usize) {
-    let mut authors: Option<Vec<Author<'src>>> = None;
+    key: &'src str,
+) -> AttributeEntry<'src>
+where
+    I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
+{
+    let val_cursor = inp.cursor();
+    let val_start_span: SourceSpan = inp.span_since(&val_cursor);
+    let val_byte_start = val_start_span.start;
 
-    if !is_author_line(tokens, i) {
-        return (authors, i, span_end);
+    let mut last_end = val_byte_start;
+    let mut last_token: Option<Token<'src>> = None;
+    let mut line_empty = true;
+
+    while inp.peek().is_some() && !matches!(inp.peek(), Some(Token::Newline)) {
+        let before = inp.cursor();
+        let tok = inp.next().unwrap();
+        let span: SourceSpan = inp.span_since(&before);
+        last_end = span.end;
+        last_token = Some(tok);
+        line_empty = false;
     }
 
-    let line_start = i;
-    while i < tokens.len() && !matches!(tokens[i].0, Token::Newline) {
-        i += 1;
-    }
-    let author_text = &source[tokens[line_start].1.start..tokens[i - 1].1.end];
-    let parsed = parse_authors(author_text);
-    if !parsed.is_empty() {
-        span_end = tokens[i - 1].1.end;
-        authors = Some(parsed);
-    }
-    // Consume trailing newline
-    if i < tokens.len() && matches!(tokens[i].0, Token::Newline) {
-        i += 1;
-    }
-
-    // Try to parse revision line (only valid after author line)
-    if i < tokens.len() && !matches!(tokens[i].0, Token::Colon | Token::Newline) {
-        let rev_line_start = i;
-        while i < tokens.len() && !matches!(tokens[i].0, Token::Newline) {
-            i += 1;
+    if line_empty {
+        if matches!(inp.peek(), Some(Token::Newline)) {
+            inp.skip();
         }
-        let rev_text = &source[tokens[rev_line_start].1.start..tokens[i - 1].1.end];
-        if is_revision_line(rev_text) {
-            span_end = tokens[i - 1].1.end;
+        return AttributeEntry::Set {
+            key,
+            value: AttributeValue::Single(""),
+        };
+    }
+
+    let has_backslash = matches!(last_token, Some(Token::Backslash));
+    let has_plus = matches!(last_token, Some(Token::Plus));
+
+    if has_backslash {
+        let segments = collect_multiline_segments(inp, source, val_byte_start, last_end, true);
+        AttributeEntry::Set {
+            key,
+            value: AttributeValue::Multiline(segments),
+        }
+    } else if has_plus {
+        let segments = collect_multiline_segments(inp, source, val_byte_start, last_end, false);
+        AttributeEntry::Set {
+            key,
+            value: AttributeValue::MultilineLegacy(segments),
+        }
+    } else {
+        let value = &source[val_byte_start..last_end];
+        if matches!(inp.peek(), Some(Token::Newline)) {
+            inp.skip();
+        }
+        AttributeEntry::Set {
+            key,
+            value: AttributeValue::Single(value),
+        }
+    }
+}
+
+/// Try to parse a single attribute entry from the current position.
+///
+/// Expects the leading `:` to have already been consumed. On failure, the
+/// caller is responsible for rewinding via a saved checkpoint.
+fn try_parse_attr_entry<'tokens, 'src: 'tokens, I>(
+    inp: &mut chumsky::input::InputRef<'tokens, '_, I, BlockExtra<'tokens, 'src>>,
+    source: &'src str,
+) -> Result<AttributeEntry<'src>, ()>
+where
+    I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
+{
+    // Check bang prefix for delete syntax.
+    let (key, is_delete) = if matches!(inp.peek(), Some(Token::Bang)) {
+        inp.skip();
+        let key = parse_attr_name(inp, source)?;
+        if !matches!(inp.peek(), Some(Token::Colon)) {
+            return Err(());
+        }
+        inp.skip();
+        (key, true)
+    } else {
+        let key = parse_attr_name(inp, source)?;
+        if matches!(inp.peek(), Some(Token::Bang)) {
+            inp.skip();
+            if !matches!(inp.peek(), Some(Token::Colon)) {
+                return Err(());
+            }
+            inp.skip();
+            (key, true)
+        } else if matches!(inp.peek(), Some(Token::Colon)) {
+            inp.skip();
+            (key, false)
         } else {
-            // Not a revision line — rewind
-            i = rev_line_start;
+            return Err(());
         }
-        // Consume trailing newline
-        if i < tokens.len() && matches!(tokens[i].0, Token::Newline) {
-            i += 1;
+    };
+
+    if is_delete {
+        if inp.peek().is_some() && !matches!(inp.peek(), Some(Token::Newline)) {
+            return Err(());
         }
+        if matches!(inp.peek(), Some(Token::Newline)) {
+            inp.skip();
+        }
+        return Ok(AttributeEntry::Delete { key });
     }
 
-    (authors, i, span_end)
+    // After the second colon, expect whitespace before value.
+    match inp.peek() {
+        None => {
+            return Ok(AttributeEntry::Set {
+                key,
+                value: AttributeValue::Single(""),
+            });
+        }
+        Some(Token::Newline) => {
+            inp.skip();
+            return Ok(AttributeEntry::Set {
+                key,
+                value: AttributeValue::Single(""),
+            });
+        }
+        Some(Token::Whitespace) => {
+            inp.skip();
+        }
+        _ => return Err(()),
+    }
+
+    Ok(parse_attribute_value_imperative(inp, source, key))
+}
+
+/// Skip line comments (`// ...`) imperatively. Returns `true` if a comment was consumed.
+fn try_skip_line_comment<'tokens, 'src: 'tokens, I>(
+    inp: &mut chumsky::input::InputRef<'tokens, '_, I, BlockExtra<'tokens, 'src>>,
+) -> bool
+where
+    I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
+{
+    if !matches!(inp.peek(), Some(Token::Slash)) {
+        return false;
+    }
+    let save = inp.save();
+    inp.skip();
+    if matches!(inp.peek(), Some(Token::Slash)) {
+        while inp.peek().is_some() && !matches!(inp.peek(), Some(Token::Newline)) {
+            inp.skip();
+        }
+        if matches!(inp.peek(), Some(Token::Newline)) {
+            inp.skip();
+        }
+        true
+    } else {
+        inp.rewind(save);
+        false
+    }
+}
+
+/// Parse attribute entries and line comments in a loop, applying entries to the
+/// given attributes map. Returns `true` if at least one entry was parsed.
+fn parse_attr_entries_loop<'tokens, 'src: 'tokens, I>(
+    inp: &mut chumsky::input::InputRef<'tokens, '_, I, BlockExtra<'tokens, 'src>>,
+    source: &'src str,
+    attributes: &mut HashMap<&'src str, AttributeValue<'src>>,
+) -> bool
+where
+    I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
+{
+    let mut parsed_any = false;
+    loop {
+        if try_skip_line_comment(inp) {
+            continue;
+        }
+
+        if !matches!(inp.peek(), Some(Token::Colon)) {
+            break;
+        }
+
+        let attr_save = inp.save();
+        inp.skip(); // consume leading `:`
+
+        if let Ok(entry) = try_parse_attr_entry(inp, source) {
+            parsed_any = true;
+            apply_attribute_entry(entry, attributes);
+        } else {
+            inp.rewind(attr_save);
+            break;
+        }
+    }
+    parsed_any
+}
+
+/// Parse body-only attribute entries (no title).
+fn body_only_attrs<'tokens, 'src: 'tokens, I>(
+    tokens: &'tokens [Spanned<'src>],
+    source: &'src str,
+    idx: &'tokens SourceIndex,
+) -> impl Parser<'tokens, I, HeaderResult<'src>, BlockExtra<'tokens, 'src>>
+where
+    I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
+{
+    custom(move |inp| {
+        let start_cursor = inp.cursor();
+
+        // Must start with a valid attribute entry (colon).
+        if !matches!(inp.peek(), Some(Token::Colon)) {
+            return Err(Rich::custom(
+                inp.span_since(&start_cursor),
+                "expected attribute entry",
+            ));
+        }
+
+        // Parse all attribute entries and comments.
+        let mut attributes = HashMap::new();
+        if !parse_attr_entries_loop(inp, source, &mut attributes) {
+            return Err(Rich::custom(
+                inp.span_since(&start_cursor),
+                "no attribute entries found",
+            ));
+        }
+
+        // Compute body_start token index.
+        let consumed_span: SourceSpan = inp.span_since(&start_cursor);
+        let body_start = tokens
+            .iter()
+            .position(|t| t.1.start >= consumed_span.end)
+            .unwrap_or(tokens.len());
+
+        // Check for :doctitle: → create header.
+        if attributes.contains_key("doctitle") {
+            return Ok(
+                try_create_doctitle_header(tokens, body_start, source, idx, attributes).unwrap_or(
+                    HeaderResult {
+                        header: None,
+                        body_start,
+                        diagnostics: Vec::new(),
+                        attributes: None,
+                    },
+                ),
+            );
+        }
+
+        // Only return attributes if there are any remaining after deletions.
+        let attrs = if attributes.is_empty() {
+            None
+        } else {
+            Some(attributes)
+        };
+
+        Ok(HeaderResult {
+            header: None,
+            body_start,
+            diagnostics: Vec::new(),
+            attributes: attrs,
+        })
+    })
 }
 
 /// Try to create a header from a `:doctitle:` attribute.
@@ -784,6 +881,10 @@ fn try_create_doctitle_header<'src>(
     })
 }
 
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
+
 /// Detect a document header (`= Title`) at the start of the token stream.
 ///
 /// When a header is found, `attributes` is `Some(map)` (possibly empty).
@@ -796,51 +897,33 @@ pub(crate) fn extract_header<'src>(
     source: &'src str,
     idx: &SourceIndex,
 ) -> HeaderResult<'src> {
-    // Skip optional block attribute lines (e.g., `[glossary]`) before the title.
-    let header_token_start = skip_block_attribute_lines(tokens);
+    if tokens.is_empty() {
+        return HeaderResult {
+            header: None,
+            body_start: 0,
+            diagnostics: Vec::new(),
+            attributes: None,
+        };
+    }
 
-    // First, check for titled document: Eq Whitespace <content>
-    if let Some(result) = try_extract_titled_header(tokens, header_token_start, source, idx) {
+    // Build chumsky input from the token slice.
+    let last_span = tokens.last().unwrap().1;
+    let eoi = SourceSpan {
+        start: last_span.end,
+        end: last_span.end,
+    };
+    let input = tokens.split_token_span(eoi);
+
+    // Try titled header parser.
+    let titled = titled_header(tokens, source, idx).then_ignore(any().repeated());
+    if let Some(result) = titled.parse(input.clone()).into_output() {
         return result;
     }
 
-    // Second, check for body-only attribute entries (no title).
-    if let Some((entry, first_next)) = try_parse_attribute_entry(tokens, 0, source) {
-        let mut attributes = HashMap::new();
-        apply_attribute_entry(entry, &mut attributes);
-
-        // Continue parsing additional attribute entries.
-        let next = parse_all_attribute_entries(tokens, first_next, source, &mut attributes);
-
-        // Check for :doctitle: attribute → create header
-        if attributes.contains_key("doctitle") {
-            if let Some(result) = try_create_doctitle_header(tokens, next, source, idx, attributes)
-            {
-                return result;
-            }
-            // If try_create_doctitle_header returned None, we can't continue
-            // because attributes was consumed. This shouldn't happen in practice.
-            return HeaderResult {
-                header: None,
-                body_start: next,
-                diagnostics: Vec::new(),
-                attributes: None,
-            };
-        }
-
-        // Only return attributes if there are any remaining after deletions.
-        let attrs = if attributes.is_empty() {
-            None
-        } else {
-            Some(attributes)
-        };
-
-        return HeaderResult {
-            header: None,
-            body_start: next,
-            diagnostics: Vec::new(),
-            attributes: attrs,
-        };
+    // Try body-only attribute entries.
+    let body = body_only_attrs(tokens, source, idx).then_ignore(any().repeated());
+    if let Some(result) = body.parse(input).into_output() {
+        return result;
     }
 
     HeaderResult {

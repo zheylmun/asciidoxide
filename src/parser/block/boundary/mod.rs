@@ -10,7 +10,7 @@ mod lists;
 mod macros;
 mod metadata;
 mod sections;
-mod utility;
+pub(crate) mod utility;
 mod verbatim;
 
 use chumsky::{input::ValueInput, prelude::*};

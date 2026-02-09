@@ -6,10 +6,10 @@ use crate::span::SourceSpan;
 use crate::token::Token;
 
 /// Parser extra type (just errors, no state).
-pub(super) type BlockExtra<'tokens, 'src> = extra::Err<Rich<'tokens, Token<'src>, SourceSpan>>;
+pub(crate) type BlockExtra<'tokens, 'src> = extra::Err<Rich<'tokens, Token<'src>, SourceSpan>>;
 
 /// Match end of line (Newline or end of input).
-pub(super) fn line_end<'tokens, 'src: 'tokens, I>()
+pub(crate) fn line_end<'tokens, 'src: 'tokens, I>()
 -> impl Parser<'tokens, I, (), BlockExtra<'tokens, 'src>> + Clone
 where
     I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
@@ -27,7 +27,7 @@ where
 }
 
 /// Consume tokens until end of line, return the content span.
-pub(super) fn rest_of_line<'tokens, 'src: 'tokens, I>()
+pub(crate) fn rest_of_line<'tokens, 'src: 'tokens, I>()
 -> impl Parser<'tokens, I, SourceSpan, BlockExtra<'tokens, 'src>> + Clone
 where
     I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
