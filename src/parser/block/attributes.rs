@@ -251,6 +251,47 @@ fn parse_legacy_plus_multiline<'src>(
     (segments, pos)
 }
 
+/// Consume an attribute name starting at token index `start`.
+///
+/// Attribute names may contain hyphens and underscores, which the lexer
+/// tokenizes as separate `Hyphen`/`Underscore` tokens. This function
+/// consumes `Text` tokens interleaved with `Hyphen`/`Underscore` tokens
+/// and returns the full name as a source slice.
+///
+/// Returns `Some((key_slice, next_index))` where `next_index` is the
+/// token after the last consumed name token.
+fn consume_attribute_name<'src>(
+    tokens: &[Spanned<'src>],
+    start: usize,
+    source: &'src str,
+) -> Option<(&'src str, usize)> {
+    // Must start with a Text token.
+    if start >= tokens.len() {
+        return None;
+    }
+    if !matches!(tokens[start].0, Token::Text(_)) {
+        return None;
+    }
+
+    let span_start = tokens[start].1.start;
+    let mut pos = start + 1;
+
+    // Continue consuming Hyphen/Underscore followed by Text.
+    while pos + 1 < tokens.len()
+        && matches!(tokens[pos].0, Token::Hyphen | Token::Underscore)
+        && matches!(tokens[pos + 1].0, Token::Text(_))
+    {
+        pos += 2;
+    }
+
+    let span_end = tokens[pos - 1].1.end;
+    let key = &source[span_start..span_end];
+    if !is_valid_attribute_name(key) {
+        return None;
+    }
+    Some((key, pos))
+}
+
 /// Try to parse a single attribute entry at position `i`.
 ///
 /// Patterns:
@@ -274,39 +315,29 @@ fn try_parse_attribute_entry<'src>(
 
     // Check for bang-prefix deletion: `:!key:`
     let (key, is_delete, key_end) = if matches!(tokens[i + 1].0, Token::Bang) {
-        // Need at least 4 tokens: Colon Bang Text Colon
+        // Need at least 4 tokens: Colon Bang <name...> Colon
         if i + 3 >= tokens.len() {
             return None;
         }
-        let key = match &tokens[i + 2].0 {
-            Token::Text(s) => *s,
-            _ => return None,
-        };
-        if !is_valid_attribute_name(key) {
+        let (key, after_name) = consume_attribute_name(tokens, i + 2, source)?;
+        if after_name >= tokens.len() || !matches!(tokens[after_name].0, Token::Colon) {
             return None;
         }
-        if !matches!(tokens[i + 3].0, Token::Colon) {
-            return None;
-        }
-        (key, true, i + 4)
+        (key, true, after_name + 1)
     } else {
         // Regular or bang-suffix: `:key:` or `:key!:`
-        let key = match &tokens[i + 1].0 {
-            Token::Text(s) => *s,
-            _ => return None,
-        };
-        if !is_valid_attribute_name(key) {
-            return None;
-        }
+        let (key, after_name) = consume_attribute_name(tokens, i + 1, source)?;
 
         // Check for bang-suffix: `:key!:`
-        if matches!(tokens[i + 2].0, Token::Bang) {
-            if i + 3 >= tokens.len() || !matches!(tokens[i + 3].0, Token::Colon) {
+        if after_name < tokens.len() && matches!(tokens[after_name].0, Token::Bang) {
+            if after_name + 1 >= tokens.len()
+                || !matches!(tokens[after_name + 1].0, Token::Colon)
+            {
                 return None;
             }
-            (key, true, i + 4)
-        } else if matches!(tokens[i + 2].0, Token::Colon) {
-            (key, false, i + 3)
+            (key, true, after_name + 2)
+        } else if after_name < tokens.len() && matches!(tokens[after_name].0, Token::Colon) {
+            (key, false, after_name + 1)
         } else {
             return None;
         }

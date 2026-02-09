@@ -257,6 +257,44 @@ mod tests {
     }
 
     #[test]
+    fn doc_attribute_with_hyphens() {
+        let (doc, diags) = parse_doc(":type-req-prefix: REQ");
+        assert!(diags.is_empty());
+        assert!(doc.header.is_none());
+        assert!(doc.blocks.is_empty());
+        let attrs = doc.attributes.as_ref().expect("should have attributes");
+        assert_eq!(
+            attrs.get("type-req-prefix"),
+            Some(&crate::asg::AttributeValue::Single("REQ"))
+        );
+    }
+
+    #[test]
+    fn doc_attribute_with_underscores() {
+        let (doc, diags) = parse_doc(":my_attr: value");
+        assert!(diags.is_empty());
+        let attrs = doc.attributes.as_ref().expect("should have attributes");
+        assert_eq!(
+            attrs.get("my_attr"),
+            Some(&crate::asg::AttributeValue::Single("value"))
+        );
+    }
+
+    #[test]
+    fn doc_attribute_hyphen_delete_bang_prefix() {
+        let (doc, diags) = parse_doc(":type-req-prefix: REQ\n:!type-req-prefix:");
+        assert!(diags.is_empty());
+        assert!(doc.attributes.is_none());
+    }
+
+    #[test]
+    fn doc_attribute_hyphen_delete_bang_suffix() {
+        let (doc, diags) = parse_doc(":type-req-prefix: REQ\n:type-req-prefix!:");
+        assert!(diags.is_empty());
+        assert!(doc.attributes.is_none());
+    }
+
+    #[test]
     fn doc_invalid_attr_name_becomes_paragraph() {
         // `:foo:bar: baz` has a colon in the name position - should be a paragraph
         let (doc, diags) = parse_doc(":foo:bar: baz");
