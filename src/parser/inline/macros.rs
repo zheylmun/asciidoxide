@@ -3,6 +3,8 @@
 //! Procedural detection runs before chumsky parsing to identify macros
 //! and replace their token ranges with placeholder tokens.
 
+use std::borrow::Cow;
+
 use super::Spanned;
 use crate::token::Token;
 
@@ -254,10 +256,27 @@ fn try_bare_url<'src>(
 /// This implements the `AsciiDoc` spec rule that "a backslash may cause a different
 /// markup sequence to be matched".
 ///
-/// Returns a new token vector with the transformations applied.
-pub(super) fn preprocess_escaped_unconstrained<'src>(
-    tokens: &[Spanned<'src>],
-) -> Vec<Spanned<'src>> {
+/// Returns `Cow::Borrowed` when no escaped delimiters exist (the common case),
+/// avoiding a heap allocation.
+pub(super) fn preprocess_escaped_unconstrained<'tokens, 'src>(
+    tokens: &'tokens [Spanned<'src>],
+) -> Cow<'tokens, [Spanned<'src>]> {
+    // Fast path: scan for any backslash followed by a double delimiter.
+    let has_escaped = tokens.windows(3).any(|w| {
+        matches!(w[0].0, Token::Backslash)
+            && matches!(
+                (&w[1].0, &w[2].0),
+                (Token::Star, Token::Star)
+                    | (Token::Underscore, Token::Underscore)
+                    | (Token::Backtick, Token::Backtick)
+                    | (Token::Hash, Token::Hash)
+            )
+    });
+
+    if !has_escaped {
+        return Cow::Borrowed(tokens);
+    }
+
     let mut result = Vec::with_capacity(tokens.len());
     let mut i = 0;
 
@@ -291,5 +310,5 @@ pub(super) fn preprocess_escaped_unconstrained<'src>(
         i += 1;
     }
 
-    result
+    Cow::Owned(result)
 }

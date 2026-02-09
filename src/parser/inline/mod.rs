@@ -231,8 +231,9 @@ pub(super) fn run_inline_parser<'tokens, 'src: 'tokens>(
     }
 
     // First, preprocess escaped unconstrained delimiters.
+    // Returns Cow::Borrowed when no transformations are needed (common case).
     let preprocessed = preprocess_escaped_unconstrained(tokens);
-    let tokens = &preprocessed[..];
+    let tokens = &*preprocessed;
 
     let macros = find_inline_macros(tokens, source);
 

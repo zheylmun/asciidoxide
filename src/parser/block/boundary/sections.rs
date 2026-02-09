@@ -4,7 +4,7 @@ use chumsky::{input::ValueInput, prelude::*};
 
 use super::utility::{
     BlockExtra, SectionParams, extract_embedded_anchor, strip_trailing_eq_marker,
-    trim_trailing_block_attrs, trim_trailing_newlines,
+    trim_trailing_newlines,
 };
 use crate::parser::block::raw_block::RawBlock;
 use crate::span::{SourceIndex, SourceSpan};
@@ -319,13 +319,22 @@ where
         let body_start = body_start_span.start;
 
         let mut at_line_start = true;
-        let mut ended_by_heading = false;
+        let mut attr_run_start: Option<_> = None;
         loop {
             match inp.peek() {
                 None => break,
                 Some(Token::Newline) => {
                     inp.skip();
                     at_line_start = true;
+                }
+                Some(Token::LBracket) if at_line_start => {
+                    if attr_run_start.is_none() {
+                        attr_run_start = Some(inp.save());
+                    }
+                    while inp.peek().is_some() && !matches!(inp.peek(), Some(Token::Newline)) {
+                        inp.skip();
+                    }
+                    at_line_start = false;
                 }
                 // Check for AsciiDoc section heading (==)
                 Some(Token::Eq) if at_line_start => {
@@ -338,11 +347,15 @@ where
                     if count >= 2 && matches!(inp.peek(), Some(Token::Whitespace)) {
                         let check_level = count - 1;
                         if check_level <= level {
-                            inp.rewind(check_before);
-                            ended_by_heading = true;
+                            if let Some(run_start) = attr_run_start {
+                                inp.rewind(run_start);
+                            } else {
+                                inp.rewind(check_before);
+                            }
                             break;
                         }
                     }
+                    attr_run_start = None;
                     at_line_start = false;
                 }
                 // Check for Markdown heading (##)
@@ -356,15 +369,22 @@ where
                     if count >= 2 && matches!(inp.peek(), Some(Token::Whitespace)) {
                         let check_level = count - 1;
                         if check_level <= level {
-                            inp.rewind(check_before);
-                            ended_by_heading = true;
+                            if let Some(run_start) = attr_run_start {
+                                inp.rewind(run_start);
+                            } else {
+                                inp.rewind(check_before);
+                            }
                             break;
                         }
                     }
+                    attr_run_start = None;
                     at_line_start = false;
                 }
                 _ => {
                     inp.skip();
+                    if at_line_start {
+                        attr_run_start = None;
+                    }
                     at_line_start = false;
                 }
             }
@@ -372,11 +392,7 @@ where
 
         let body_end_span: SourceSpan = inp.span_since(&body_cursor);
         let body_end = body_end_span.end;
-        let actual_body_end = if ended_by_heading {
-            trim_trailing_block_attrs(source, body_start, body_end)
-        } else {
-            trim_trailing_newlines(source, body_start, body_end)
-        };
+        let actual_body_end = trim_trailing_newlines(source, body_start, body_end);
 
         Ok(build_section_block(
             &SectionParams {
@@ -497,13 +513,22 @@ where
         let body_start = body_start_span.start;
 
         let mut at_line_start = true;
-        let mut ended_by_heading = false;
+        let mut attr_run_start: Option<_> = None;
         loop {
             match inp.peek() {
                 None => break,
                 Some(Token::Newline) => {
                     inp.skip();
                     at_line_start = true;
+                }
+                Some(Token::LBracket) if at_line_start => {
+                    if attr_run_start.is_none() {
+                        attr_run_start = Some(inp.save());
+                    }
+                    while inp.peek().is_some() && !matches!(inp.peek(), Some(Token::Newline)) {
+                        inp.skip();
+                    }
+                    at_line_start = false;
                 }
                 Some(Token::Eq) if at_line_start => {
                     let check_before = inp.save();
@@ -515,15 +540,22 @@ where
                     if count >= 2 && matches!(inp.peek(), Some(Token::Whitespace)) {
                         let check_level = count - 1;
                         if check_level <= level {
-                            inp.rewind(check_before);
-                            ended_by_heading = true;
+                            if let Some(run_start) = attr_run_start {
+                                inp.rewind(run_start);
+                            } else {
+                                inp.rewind(check_before);
+                            }
                             break;
                         }
                     }
+                    attr_run_start = None;
                     at_line_start = false;
                 }
                 _ => {
                     inp.skip();
+                    if at_line_start {
+                        attr_run_start = None;
+                    }
                     at_line_start = false;
                 }
             }
@@ -531,11 +563,7 @@ where
 
         let body_end_span: SourceSpan = inp.span_since(&body_cursor);
         let body_end = body_end_span.end;
-        let actual_body_end = if ended_by_heading {
-            trim_trailing_block_attrs(source, body_start, body_end)
-        } else {
-            trim_trailing_newlines(source, body_start, body_end)
-        };
+        let actual_body_end = trim_trailing_newlines(source, body_start, body_end);
 
         let mut block = RawBlock::new("section");
         block.level = Some(level);
