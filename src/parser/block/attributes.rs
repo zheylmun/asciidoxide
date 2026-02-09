@@ -292,6 +292,29 @@ fn consume_attribute_name<'src>(
     Some((key, pos))
 }
 
+/// Try to skip a line comment (`// ...`) at position `i`.
+///
+/// Returns the token index after the comment (past the newline) if a
+/// comment was found, or `None` if the tokens at `i` are not a comment.
+fn try_skip_line_comment(tokens: &[Spanned<'_>], i: usize) -> Option<usize> {
+    if i + 1 < tokens.len()
+        && matches!(tokens[i].0, Token::Slash)
+        && matches!(tokens[i + 1].0, Token::Slash)
+    {
+        let mut pos = i + 2;
+        while pos < tokens.len() && !matches!(tokens[pos].0, Token::Newline) {
+            pos += 1;
+        }
+        // Skip the newline itself.
+        if pos < tokens.len() {
+            pos += 1;
+        }
+        Some(pos)
+    } else {
+        None
+    }
+}
+
 /// Try to parse a single attribute entry at position `i`.
 ///
 /// Patterns:
@@ -521,9 +544,18 @@ fn parse_all_attribute_entries<'src>(
     source: &'src str,
     attributes: &mut HashMap<&'src str, AttributeValue<'src>>,
 ) -> usize {
-    while let Some((entry, next)) = try_parse_attribute_entry(tokens, i, source) {
-        apply_attribute_entry(entry, attributes);
-        i = next;
+    loop {
+        // Skip line comments between attribute entries.
+        if let Some(after_comment) = try_skip_line_comment(tokens, i) {
+            i = after_comment;
+            continue;
+        }
+        if let Some((entry, next)) = try_parse_attribute_entry(tokens, i, source) {
+            apply_attribute_entry(entry, attributes);
+            i = next;
+        } else {
+            break;
+        }
     }
     i
 }
@@ -590,19 +622,28 @@ fn try_extract_titled_header<'src>(
     i = new_i;
     span_end = new_span_end;
 
-    // Parse attribute entry lines.
+    // Parse attribute entry lines, skipping line comments.
     // When there's no author/revision, attribute entries extend the header span.
     let mut attributes = HashMap::new();
-    while let Some((entry, next)) = try_parse_attribute_entry(tokens, i, source) {
-        if authors.is_none() {
-            // Extend header span to include attribute entries
-            span_end = tokens[next - 1].1.end;
-            if next > 0 && matches!(tokens[next - 1].0, Token::Newline) {
-                span_end = tokens[next - 2].1.end;
-            }
+    loop {
+        // Skip line comments between attribute entries.
+        if let Some(after_comment) = try_skip_line_comment(tokens, i) {
+            i = after_comment;
+            continue;
         }
-        apply_attribute_entry(entry, &mut attributes);
-        i = next;
+        if let Some((entry, next)) = try_parse_attribute_entry(tokens, i, source) {
+            if authors.is_none() {
+                // Extend header span to include attribute entries
+                span_end = tokens[next - 1].1.end;
+                if next > 0 && matches!(tokens[next - 1].0, Token::Newline) {
+                    span_end = tokens[next - 2].1.end;
+                }
+            }
+            apply_attribute_entry(entry, &mut attributes);
+            i = next;
+        } else {
+            break;
+        }
     }
 
     let header_span = SourceSpan {

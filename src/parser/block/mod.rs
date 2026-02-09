@@ -295,6 +295,37 @@ mod tests {
     }
 
     #[test]
+    fn doc_comment_between_body_attributes() {
+        let (doc, diags) = parse_doc(":foo: bar\n// a comment\n:baz: qux");
+        assert!(diags.is_empty());
+        let attrs = doc.attributes.as_ref().expect("should have attributes");
+        assert_eq!(
+            attrs.get("foo"),
+            Some(&crate::asg::AttributeValue::Single("bar"))
+        );
+        assert_eq!(
+            attrs.get("baz"),
+            Some(&crate::asg::AttributeValue::Single("qux"))
+        );
+    }
+
+    #[test]
+    fn doc_comment_between_header_attributes() {
+        let (doc, diags) = parse_doc("= Title\n:foo: bar\n// a comment\n:baz: qux\n\nbody");
+        assert!(diags.is_empty());
+        assert!(doc.header.is_some());
+        let attrs = doc.attributes.as_ref().expect("should have attributes");
+        assert_eq!(
+            attrs.get("foo"),
+            Some(&crate::asg::AttributeValue::Single("bar"))
+        );
+        assert_eq!(
+            attrs.get("baz"),
+            Some(&crate::asg::AttributeValue::Single("qux"))
+        );
+    }
+
+    #[test]
     fn doc_invalid_attr_name_becomes_paragraph() {
         // `:foo:bar: baz` has a colon in the name position - should be a paragraph
         let (doc, diags) = parse_doc(":foo:bar: baz");
