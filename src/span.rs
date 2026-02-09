@@ -109,56 +109,62 @@ impl chumsky::span::Span for SourceSpan {
 /// Build one from the source text before (or after) parsing, then call
 /// [`location`](Self::location) to turn any [`SourceSpan`] into an ASG
 /// [`Location`].
+///
+/// Columns are computed on demand from the source string rather than
+/// pre-computed, keeping memory usage proportional to the number of lines
+/// rather than the number of bytes.
 #[derive(Debug, Clone)]
-pub struct SourceIndex {
+pub struct SourceIndex<'a> {
+    /// Reference to the original source text.
+    source: &'a str,
     /// Byte offset of the first character on each line.
     /// `line_starts[0]` is always `0`.
     line_starts: Vec<usize>,
-    /// 0-based character column for each byte offset.
-    ///
-    /// Multi-byte characters map all their bytes to the same column.
-    /// Length is `source.len() + 1` (extra slot for end-of-input).
-    byte_to_col: Vec<usize>,
 }
 
-impl SourceIndex {
+impl<'a> SourceIndex<'a> {
     /// Build a line-start index from the source text.
     #[must_use]
-    pub fn new(source: &str) -> Self {
+    pub fn new(source: &'a str) -> Self {
         let mut line_starts = vec![0];
-        let mut byte_to_col = vec![0; source.len() + 1];
-        let mut col: usize = 0;
-
         for (i, ch) in source.char_indices() {
-            for slot in byte_to_col.iter_mut().skip(i).take(ch.len_utf8()) {
-                *slot = col;
-            }
             if ch == '\n' {
                 line_starts.push(i + 1);
-                col = 0;
-            } else {
-                col += 1;
             }
         }
-        byte_to_col[source.len()] = col;
-
         Self {
+            source,
             line_starts,
-            byte_to_col,
         }
     }
 
     /// Convert a byte offset to a 1-based [`Position`].
     ///
     /// The column value counts Unicode characters from the start of the line
-    /// (1-based).
+    /// (1-based). If the byte offset falls inside a multi-byte character, it
+    /// is snapped back to the start of that character.
     #[must_use]
     pub fn position(&self, byte_offset: usize) -> Position {
         let line = self
             .line_starts
             .partition_point(|&start| start <= byte_offset)
             - 1;
-        let col = self.byte_to_col[byte_offset];
+        let line_start = self.line_starts[line];
+        let relative = byte_offset - line_start;
+        let line_slice = &self.source[line_start..];
+
+        // Snap to a char boundary if we're inside a multi-byte character.
+        let snapped = if line_slice.is_char_boundary(relative) {
+            relative
+        } else {
+            let mut b = relative;
+            while b > 0 && !line_slice.is_char_boundary(b) {
+                b -= 1;
+            }
+            b
+        };
+
+        let col = line_slice[..snapped].chars().count();
         Position {
             line: line + 1,
             col: col + 1,
