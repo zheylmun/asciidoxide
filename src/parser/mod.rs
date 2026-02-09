@@ -8,6 +8,8 @@
 mod block;
 mod inline;
 
+pub(crate) use block::BlockExtra;
+
 use crate::asg::{Document, InlineNode};
 use crate::diagnostic::ParseDiagnostic;
 use crate::lexer::lex;

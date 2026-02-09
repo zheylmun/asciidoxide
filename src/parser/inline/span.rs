@@ -6,13 +6,13 @@ use crate::asg::{InlineNode, SpanNode, TextNode};
 use crate::span::{SourceIndex, SourceSpan};
 use crate::token::Token;
 
-use super::ParseExtra;
+use crate::parser::BlockExtra;
 
 /// Parser for escaped span delimiters: `\*`, `\_`, `` \` ``, `\#` → literal text.
 pub(super) fn escaped_delimiter_parser<'tokens, 'src: 'tokens, I>(
     source: &'src str,
     idx: &'tokens SourceIndex,
-) -> impl Parser<'tokens, I, InlineNode<'src>, ParseExtra<'tokens, 'src>> + Clone + 'tokens
+) -> impl Parser<'tokens, I, InlineNode<'src>, BlockExtra<'tokens, 'src>> + Clone + 'tokens
 where
     I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
 {
@@ -45,8 +45,8 @@ pub(super) fn code_span_parsers<'tokens, 'src: 'tokens, I>(
     source: &'src str,
     idx: &'tokens SourceIndex,
 ) -> (
-    impl Parser<'tokens, I, InlineNode<'src>, ParseExtra<'tokens, 'src>> + Clone + 'tokens,
-    impl Parser<'tokens, I, InlineNode<'src>, ParseExtra<'tokens, 'src>> + Clone + 'tokens,
+    impl Parser<'tokens, I, InlineNode<'src>, BlockExtra<'tokens, 'src>> + Clone + 'tokens,
+    impl Parser<'tokens, I, InlineNode<'src>, BlockExtra<'tokens, 'src>> + Clone + 'tokens,
 )
 where
     I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
@@ -109,12 +109,12 @@ pub(super) fn strong_span_parsers<'tokens, 'src: 'tokens, I, P>(
     inner: P,
     idx: &'tokens SourceIndex,
 ) -> (
-    impl Parser<'tokens, I, InlineNode<'src>, ParseExtra<'tokens, 'src>> + Clone + 'tokens,
-    impl Parser<'tokens, I, InlineNode<'src>, ParseExtra<'tokens, 'src>> + Clone + 'tokens,
+    impl Parser<'tokens, I, InlineNode<'src>, BlockExtra<'tokens, 'src>> + Clone + 'tokens,
+    impl Parser<'tokens, I, InlineNode<'src>, BlockExtra<'tokens, 'src>> + Clone + 'tokens,
 )
 where
     I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
-    P: Parser<'tokens, I, InlineNode<'src>, ParseExtra<'tokens, 'src>> + Clone + 'tokens,
+    P: Parser<'tokens, I, InlineNode<'src>, BlockExtra<'tokens, 'src>> + Clone + 'tokens,
 {
     // For unconstrained (**), use negative lookahead to stop before **.
     // This prevents the inner parser from consuming potential closing delimiters.
@@ -182,12 +182,12 @@ pub(super) fn emphasis_span_parsers<'tokens, 'src: 'tokens, I, P>(
     inner: P,
     idx: &'tokens SourceIndex,
 ) -> (
-    impl Parser<'tokens, I, InlineNode<'src>, ParseExtra<'tokens, 'src>> + Clone + 'tokens,
-    impl Parser<'tokens, I, InlineNode<'src>, ParseExtra<'tokens, 'src>> + Clone + 'tokens,
+    impl Parser<'tokens, I, InlineNode<'src>, BlockExtra<'tokens, 'src>> + Clone + 'tokens,
+    impl Parser<'tokens, I, InlineNode<'src>, BlockExtra<'tokens, 'src>> + Clone + 'tokens,
 )
 where
     I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
-    P: Parser<'tokens, I, InlineNode<'src>, ParseExtra<'tokens, 'src>> + Clone + 'tokens,
+    P: Parser<'tokens, I, InlineNode<'src>, BlockExtra<'tokens, 'src>> + Clone + 'tokens,
 {
     // For unconstrained (__), use negative lookahead to stop before __.
     let not_double_underscore = just(Token::Underscore)
@@ -256,12 +256,12 @@ pub(super) fn mark_span_parsers<'tokens, 'src: 'tokens, I, P>(
     inner: P,
     idx: &'tokens SourceIndex,
 ) -> (
-    impl Parser<'tokens, I, InlineNode<'src>, ParseExtra<'tokens, 'src>> + Clone + 'tokens,
-    impl Parser<'tokens, I, InlineNode<'src>, ParseExtra<'tokens, 'src>> + Clone + 'tokens,
+    impl Parser<'tokens, I, InlineNode<'src>, BlockExtra<'tokens, 'src>> + Clone + 'tokens,
+    impl Parser<'tokens, I, InlineNode<'src>, BlockExtra<'tokens, 'src>> + Clone + 'tokens,
 )
 where
     I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
-    P: Parser<'tokens, I, InlineNode<'src>, ParseExtra<'tokens, 'src>> + Clone + 'tokens,
+    P: Parser<'tokens, I, InlineNode<'src>, BlockExtra<'tokens, 'src>> + Clone + 'tokens,
 {
     // For unconstrained (##), use negative lookahead to stop before ##.
     let not_double_hash = just(Token::Hash).then(just(Token::Hash)).not().rewind();

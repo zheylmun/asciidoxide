@@ -2,6 +2,7 @@
 
 use chumsky::{input::ValueInput, prelude::*};
 
+use super::utility::BlockExtra;
 use crate::parser::block::raw_block::RawBlock;
 use crate::span::{SourceIndex, SourceSpan};
 use crate::token::Token;
@@ -17,7 +18,7 @@ fn compound_block<'tokens, 'src: 'tokens, I>(
     block_name: &'static str,
     source: &'src str,
     idx: &'tokens SourceIndex,
-) -> impl Parser<'tokens, I, RawBlock<'src>, extra::Err<Rich<'tokens, Token<'src>, SourceSpan>>> + Clone
+) -> impl Parser<'tokens, I, RawBlock<'src>, BlockExtra<'tokens, 'src>> + Clone
 where
     I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
 {
@@ -142,7 +143,7 @@ where
 pub(super) fn example_block<'tokens, 'src: 'tokens, I>(
     source: &'src str,
     idx: &'tokens SourceIndex,
-) -> impl Parser<'tokens, I, RawBlock<'src>, extra::Err<Rich<'tokens, Token<'src>, SourceSpan>>> + Clone
+) -> impl Parser<'tokens, I, RawBlock<'src>, BlockExtra<'tokens, 'src>> + Clone
 where
     I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
 {
@@ -153,7 +154,7 @@ where
 pub(super) fn sidebar_block<'tokens, 'src: 'tokens, I>(
     source: &'src str,
     idx: &'tokens SourceIndex,
-) -> impl Parser<'tokens, I, RawBlock<'src>, extra::Err<Rich<'tokens, Token<'src>, SourceSpan>>> + Clone
+) -> impl Parser<'tokens, I, RawBlock<'src>, BlockExtra<'tokens, 'src>> + Clone
 where
     I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
 {
@@ -164,7 +165,7 @@ where
 pub(super) fn quote_block<'tokens, 'src: 'tokens, I>(
     source: &'src str,
     idx: &'tokens SourceIndex,
-) -> impl Parser<'tokens, I, RawBlock<'src>, extra::Err<Rich<'tokens, Token<'src>, SourceSpan>>> + Clone
+) -> impl Parser<'tokens, I, RawBlock<'src>, BlockExtra<'tokens, 'src>> + Clone
 where
     I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
 {
@@ -177,7 +178,7 @@ where
 pub(super) fn open_block<'tokens, 'src: 'tokens, I>(
     source: &'src str,
     idx: &'tokens SourceIndex,
-) -> impl Parser<'tokens, I, RawBlock<'src>, extra::Err<Rich<'tokens, Token<'src>, SourceSpan>>> + Clone
+) -> impl Parser<'tokens, I, RawBlock<'src>, BlockExtra<'tokens, 'src>> + Clone
 where
     I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
 {

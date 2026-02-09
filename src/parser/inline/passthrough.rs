@@ -6,7 +6,7 @@ use crate::asg::{InlineNode, RawNode, TextNode};
 use crate::span::{SourceIndex, SourceSpan};
 use crate::token::Token;
 
-use super::ParseExtra;
+use crate::parser::BlockExtra;
 
 /// Parsers for inline literal (plus delimiters): unconstrained (`++..++`)
 /// and constrained (`+..+`).
@@ -19,8 +19,8 @@ pub(super) fn inline_literal_parsers<'tokens, 'src: 'tokens, I>(
     source: &'src str,
     idx: &'tokens SourceIndex,
 ) -> (
-    impl Parser<'tokens, I, InlineNode<'src>, ParseExtra<'tokens, 'src>> + Clone + 'tokens,
-    impl Parser<'tokens, I, InlineNode<'src>, ParseExtra<'tokens, 'src>> + Clone + 'tokens,
+    impl Parser<'tokens, I, InlineNode<'src>, BlockExtra<'tokens, 'src>> + Clone + 'tokens,
+    impl Parser<'tokens, I, InlineNode<'src>, BlockExtra<'tokens, 'src>> + Clone + 'tokens,
 )
 where
     I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
@@ -73,7 +73,7 @@ where
 pub(super) fn triple_plus_passthrough_parser<'tokens, 'src: 'tokens, I>(
     source: &'src str,
     idx: &'tokens SourceIndex,
-) -> impl Parser<'tokens, I, InlineNode<'src>, ParseExtra<'tokens, 'src>> + Clone + 'tokens
+) -> impl Parser<'tokens, I, InlineNode<'src>, BlockExtra<'tokens, 'src>> + Clone + 'tokens
 where
     I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
 {

@@ -15,6 +15,7 @@ use crate::diagnostic::ParseDiagnostic;
 use crate::span::SourceIndex;
 
 pub(super) use attributes::{HeaderResult, extract_header};
+pub(crate) use boundary::utility::BlockExtra;
 
 /// Build block-level ASG nodes from a body token stream.
 ///

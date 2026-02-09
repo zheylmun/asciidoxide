@@ -4,11 +4,12 @@ mod macros;
 mod passthrough;
 mod span;
 
-use chumsky::{extra, input::ValueInput, prelude::*};
+use chumsky::{input::ValueInput, prelude::*};
 
 use super::Spanned;
 use crate::asg::{InlineNode, RawNode, RefNode, TextNode};
 use crate::diagnostic::{ParseDiagnostic, Severity};
+use crate::parser::BlockExtra;
 use crate::span::{SourceIndex, SourceSpan};
 use crate::token::Token;
 
@@ -19,15 +20,12 @@ use span::{
     strong_span_parsers,
 };
 
-/// Shorthand for the chumsky error type used by all inline parsers.
-type ParseExtra<'tokens, 'src> = extra::Err<Rich<'tokens, Token<'src>, SourceSpan>>;
-
 /// Parser that treats a single token as literal text.
 fn token_as_text<'tokens, 'src: 'tokens, I>(
     token: Token<'src>,
     source: &'src str,
     idx: &'tokens SourceIndex,
-) -> impl Parser<'tokens, I, InlineNode<'src>, ParseExtra<'tokens, 'src>> + Clone + 'tokens
+) -> impl Parser<'tokens, I, InlineNode<'src>, BlockExtra<'tokens, 'src>> + Clone + 'tokens
 where
     I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
 {
@@ -53,7 +51,7 @@ fn single_inline_parser<'tokens, 'src: 'tokens, I>(
     source: &'src str,
     idx: &'tokens SourceIndex,
     pre_parsed: &'tokens [InlineNode<'src>],
-) -> impl Parser<'tokens, I, InlineNode<'src>, ParseExtra<'tokens, 'src>> + Clone + 'tokens
+) -> impl Parser<'tokens, I, InlineNode<'src>, BlockExtra<'tokens, 'src>> + Clone + 'tokens
 where
     I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
 {
@@ -140,7 +138,7 @@ fn inline_parser<'tokens, 'src: 'tokens, I>(
     source: &'src str,
     idx: &'tokens SourceIndex,
     pre_parsed: &'tokens [InlineNode<'src>],
-) -> impl Parser<'tokens, I, Vec<InlineNode<'src>>, ParseExtra<'tokens, 'src>> + 'tokens
+) -> impl Parser<'tokens, I, Vec<InlineNode<'src>>, BlockExtra<'tokens, 'src>> + 'tokens
 where
     I: ValueInput<'tokens, Token = Token<'src>, Span = SourceSpan>,
 {
