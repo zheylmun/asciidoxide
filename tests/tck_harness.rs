@@ -137,8 +137,8 @@ struct JsonDocument<'a> {
     location: Option<JsonLocation>,
 }
 
-impl<'a> From<&'a asg::Document<'a>> for JsonDocument<'a> {
-    fn from(doc: &'a asg::Document<'a>) -> Self {
+impl<'a> From<&asg::Document<'a>> for JsonDocument<'a> {
+    fn from(doc: &asg::Document<'a>) -> Self {
         Self {
             name: "document",
             node_type: "block",
@@ -158,7 +158,7 @@ impl<'a> From<&'a asg::Document<'a>> for JsonDocument<'a> {
 #[derive(Serialize)]
 struct JsonAuthor<'a> {
     fullname: &'a str,
-    initials: &'a str,
+    initials: String,
     firstname: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     middlename: Option<&'a str>,
@@ -168,11 +168,11 @@ struct JsonAuthor<'a> {
     address: Option<&'a str>,
 }
 
-impl<'a> From<&'a asg::Author<'a>> for JsonAuthor<'a> {
-    fn from(a: &'a asg::Author<'a>) -> Self {
+impl<'a> From<&asg::Author<'a>> for JsonAuthor<'a> {
+    fn from(a: &asg::Author<'a>) -> Self {
         Self {
             fullname: a.fullname,
-            initials: &a.initials,
+            initials: a.initials.clone(),
             firstname: a.firstname,
             middlename: a.middlename,
             lastname: a.lastname,
@@ -190,8 +190,8 @@ struct JsonHeader<'a> {
     location: Option<JsonLocation>,
 }
 
-impl<'a> From<&'a asg::Header<'a>> for JsonHeader<'a> {
-    fn from(h: &'a asg::Header<'a>) -> Self {
+impl<'a> From<&asg::Header<'a>> for JsonHeader<'a> {
+    fn from(h: &asg::Header<'a>) -> Self {
         Self {
             title: h.title.iter().map(JsonInlineNode::from).collect(),
             authors: h
@@ -216,9 +216,9 @@ struct JsonBlockMetadata<'a> {
 impl<'a> From<&asg::BlockMetadata<'a>> for JsonBlockMetadata<'a> {
     fn from(m: &asg::BlockMetadata<'a>) -> Self {
         Self {
-            roles: m.roles.clone(),
-            options: m.options.clone(),
-            attributes: m.attributes.clone(),
+            roles: m.roles.to_vec(),
+            options: m.options.to_vec(),
+            attributes: m.attributes.iter().copied().collect(),
         }
     }
 }

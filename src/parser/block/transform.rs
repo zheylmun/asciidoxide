@@ -6,6 +6,7 @@
 //! 3. Parses title spans as inlines
 
 use super::raw_block::RawBlock;
+use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::collections::HashMap;
 
@@ -386,20 +387,20 @@ fn transform_raw_block_inner<'src>(
     block.location = raw.location;
 
     // Build metadata - move roles/options instead of cloning
-    let mut meta_attributes: std::collections::HashMap<&str, &str> = raw
+    let mut meta_attributes: SmallVec<[(&str, &str); 4]> = raw
         .named_attributes
         .iter()
-        .filter(|(k, _)| !matches!(**k, "caption" | "id" | "style"))
-        .map(|(k, v)| (*k, *v))
+        .filter(|(k, _)| !matches!(*k, "caption" | "id" | "style"))
+        .copied()
         .collect();
     if let Some(lang) = promotion.language {
-        meta_attributes.insert("language", lang);
+        meta_attributes.push(("language", lang));
     }
     if let Some(attr) = promotion.attribution {
-        meta_attributes.insert("attribution", attr);
+        meta_attributes.push(("attribution", attr));
     }
     if let Some(cite) = promotion.citetitle {
-        meta_attributes.insert("citetitle", cite);
+        meta_attributes.push(("citetitle", cite));
     }
     // Move roles and options, avoiding clone
     let roles = std::mem::take(&mut raw.roles);
@@ -487,7 +488,7 @@ fn transform_discrete_section<'src>(
         heading.metadata = Some(BlockMetadata {
             roles: raw.roles,
             options: raw.options,
-            attributes: std::collections::HashMap::new(),
+            attributes: SmallVec::new(),
         });
     }
 

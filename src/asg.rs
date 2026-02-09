@@ -3,6 +3,8 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 
+use smallvec::SmallVec;
+
 /// An attribute value that may be single-line or multiline.
 ///
 /// Stores references to source slices; allocation only happens when
@@ -61,14 +63,18 @@ impl<'a> AttributeValue<'a> {
 }
 
 /// Block-level metadata (roles, options, element attributes).
+///
+/// Attributes are stored as a `SmallVec` of key-value pairs rather than a
+/// `HashMap`, since blocks typically have 0–3 attributes.  Use
+/// `.iter().find(|(k, _)| *k == key)` instead of `.get(key)`.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct BlockMetadata<'a> {
     /// Role classes (e.g., from `[.role1.role2]`).
-    pub roles: Vec<&'a str>,
+    pub roles: SmallVec<[&'a str; 2]>,
     /// Options (e.g., from `[%option]`).
-    pub options: Vec<&'a str>,
+    pub options: SmallVec<[&'a str; 2]>,
     /// Element attributes (e.g., `name=value`).
-    pub attributes: HashMap<&'a str, &'a str>,
+    pub attributes: SmallVec<[(&'a str, &'a str); 4]>,
 }
 
 /// A 1-based source position (line and column).

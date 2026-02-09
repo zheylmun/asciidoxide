@@ -3,7 +3,7 @@
 //! These types store content as byte spans rather than parsed inline nodes,
 //! allowing block structure to be identified before inline parsing.
 
-use std::collections::HashMap;
+use smallvec::SmallVec;
 
 use crate::asg::Location;
 use crate::span::SourceSpan;
@@ -25,13 +25,13 @@ pub(super) struct RawBlock<'src> {
     /// Block style (e.g., `"source"`, `"abstract"`).
     pub(super) style: Option<&'src str>,
     /// Roles from block attributes.
-    pub(super) roles: Vec<&'src str>,
+    pub(super) roles: SmallVec<[&'src str; 2]>,
     /// Options from block attributes.
-    pub(super) options: Vec<&'src str>,
+    pub(super) options: SmallVec<[&'src str; 2]>,
     /// Positional attributes from block attribute line (all comma-separated values).
-    pub(super) positionals: Vec<&'src str>,
+    pub(super) positionals: SmallVec<[&'src str; 4]>,
     /// Named attributes from block attribute line (key=value pairs).
-    pub(super) named_attributes: HashMap<&'src str, &'src str>,
+    pub(super) named_attributes: SmallVec<[(&'src str, &'src str); 4]>,
 
     // --- Content fields (exactly one of these is Some based on content model) ---
     /// Title content span (to be parsed as inlines in phase 3).
@@ -45,7 +45,7 @@ pub(super) struct RawBlock<'src> {
     /// Principal content span for list items.
     pub(super) principal_span: Option<SourceSpan>,
     /// Term spans for description list items (each is parsed as inlines).
-    pub(super) term_spans: Vec<SourceSpan>,
+    pub(super) term_spans: SmallVec<[SourceSpan; 2]>,
     /// Reftext span for cross-references.
     pub(super) reftext_span: Option<SourceSpan>,
 
@@ -76,16 +76,16 @@ impl RawBlock<'_> {
             delimiter: None,
             id: None,
             style: None,
-            roles: Vec::new(),
-            options: Vec::new(),
-            positionals: Vec::new(),
-            named_attributes: HashMap::new(),
+            roles: SmallVec::new(),
+            options: SmallVec::new(),
+            positionals: SmallVec::new(),
+            named_attributes: SmallVec::new(),
             title_span: None,
             content_span: None,
             blocks: None,
             items: None,
             principal_span: None,
-            term_spans: Vec::new(),
+            term_spans: SmallVec::new(),
             reftext_span: None,
             level: None,
             variant: None,
@@ -109,13 +109,13 @@ pub(super) struct PendingMetadata<'src> {
     /// Block style from first positional attribute.
     pub(super) style: Option<&'src str>,
     /// Roles from `.role` shorthand.
-    pub(super) roles: Vec<&'src str>,
+    pub(super) roles: SmallVec<[&'src str; 2]>,
     /// Options from `%option` shorthand.
-    pub(super) options: Vec<&'src str>,
+    pub(super) options: SmallVec<[&'src str; 2]>,
     /// Positional attributes (all comma-separated values).
-    pub(super) positionals: Vec<&'src str>,
+    pub(super) positionals: SmallVec<[&'src str; 4]>,
     /// Named attributes (key=value pairs).
-    pub(super) named_attributes: HashMap<&'src str, &'src str>,
+    pub(super) named_attributes: SmallVec<[(&'src str, &'src str); 4]>,
     /// Reftext span from `[[id,reftext]]`.
     pub(super) reftext_span: Option<SourceSpan>,
 }

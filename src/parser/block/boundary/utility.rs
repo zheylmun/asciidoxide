@@ -126,6 +126,58 @@ pub(super) fn trim_trailing_newlines(source: &str, start: usize, end: usize) -> 
     actual_end
 }
 
+/// Trim trailing block attribute lines and blank lines from a section body span.
+///
+/// When a section body ends because of a same-or-higher-level heading, any
+/// block attribute lines (`[...]`) immediately before the heading belong to
+/// the *next* section, not the current one.  This function scans backward
+/// through the source to exclude those trailing attribute / blank lines.
+pub(super) fn trim_trailing_block_attrs(source: &str, start: usize, end: usize) -> usize {
+    let bytes = source.as_bytes();
+    let mut pos = end;
+
+    // Walk backward over lines.  Each iteration peels off one line.
+    loop {
+        // Skip trailing newlines.
+        while pos > start && bytes[pos - 1] == b'\n' {
+            pos -= 1;
+        }
+
+        if pos <= start {
+            return start;
+        }
+
+        // Find the start of the current (last non-empty) line.
+        let line_end = pos;
+        while pos > start && bytes[pos - 1] != b'\n' {
+            pos -= 1;
+        }
+        let line_start = pos;
+        let line = &source[line_start..line_end];
+        let trimmed = line.trim();
+
+        // Keep trimming if this line is a block attribute (`[...]`) or blank.
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            // This is a block attribute line — trim it.
+            continue;
+        }
+
+        // Not an attribute line — the body extends through this line.
+        return end_including_line(bytes, line_end, end);
+    }
+}
+
+/// Return the end position that includes the line ending at `line_content_end`,
+/// plus its trailing newline, capped at `max`.
+fn end_including_line(bytes: &[u8], line_content_end: usize, max: usize) -> usize {
+    let mut pos = line_content_end;
+    // Include trailing newlines after this line.
+    while pos < max && bytes[pos] == b'\n' {
+        pos += 1;
+    }
+    pos
+}
+
 /// Check if a string is a valid anchor ID.
 ///
 /// Valid IDs contain only alphanumeric characters, hyphens, underscores, and periods.

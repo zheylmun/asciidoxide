@@ -4,7 +4,7 @@ use chumsky::{input::ValueInput, prelude::*};
 
 use super::utility::{
     BlockExtra, SectionParams, extract_embedded_anchor, strip_trailing_eq_marker,
-    trim_trailing_newlines,
+    trim_trailing_block_attrs, trim_trailing_newlines,
 };
 use crate::parser::block::raw_block::RawBlock;
 use crate::span::{SourceIndex, SourceSpan};
@@ -150,8 +150,16 @@ where
         let body_start_span: SourceSpan = inp.span_since(&body_cursor);
         let body_start = body_start_span.start;
 
-        // Scan for section end
+        // Scan for section end.
+        //
+        // Block attribute lines (`[...]`) that immediately precede a
+        // same-or-higher-level heading belong to that *next* section, not
+        // the current one.  We track `attr_run_start` — a save-point just
+        // before the first `[` line in any consecutive run of attribute /
+        // blank lines.  When we hit a heading that ends this section, we
+        // rewind to `attr_run_start` so those tokens remain unconsumed.
         let mut at_line_start = true;
+        let mut attr_run_start: Option<_> = None;
         loop {
             match inp.peek() {
                 None => {
@@ -162,8 +170,27 @@ where
                     inp.skip();
                     at_line_start = true;
                 }
+                Some(Token::LBracket) if at_line_start => {
+                    // Potential block attribute line — start tracking a run
+                    // if we haven't already.
+                    if attr_run_start.is_none() {
+                        attr_run_start = Some(inp.save());
+                        // Rewind past the newline(s) before this `[` line
+                        // so the save-point includes them.
+                        // Actually we need to save *before* we consumed
+                        // the newlines leading here. We saved after the
+                        // peek, so the cursor is at `[`.  That's fine —
+                        // the separator blank lines will be re-parsed by
+                        // `blocks_parser` which tolerates leading blanks.
+                    }
+                    // Consume the rest of this line.
+                    while inp.peek().is_some() && !matches!(inp.peek(), Some(Token::Newline)) {
+                        inp.skip();
+                    }
+                    at_line_start = false;
+                }
                 Some(Token::Eq) if at_line_start => {
-                    // Potential section heading - check its level
+                    // Potential section heading — check its level
                     let check_before = inp.save();
                     let mut check_eq_count = 0;
                     while matches!(inp.peek(), Some(Token::Eq)) {
@@ -175,18 +202,29 @@ where
                     if check_eq_count >= 2 && matches!(inp.peek(), Some(Token::Whitespace)) {
                         let check_level = check_eq_count - 1;
                         if check_level <= level {
-                            // Found same or higher level section - rewind and stop
-                            inp.rewind(check_before);
+                            // Found same or higher level section — rewind to
+                            // before any trailing attribute lines so they
+                            // remain in the token stream for the next section.
+                            if let Some(run_start) = attr_run_start {
+                                inp.rewind(run_start);
+                            } else {
+                                inp.rewind(check_before);
+                            }
                             break;
                         }
                     }
 
-                    // Not a section heading or lower level - continue
-                    // Don't rewind, we've already consumed the Eq tokens
+                    // Not a section heading or lower level — those `[` lines
+                    // (if any) were body content, not trailing metadata.
+                    attr_run_start = None;
                     at_line_start = false;
                 }
                 _ => {
                     inp.skip();
+                    if at_line_start {
+                        // Non-`[` content at line start resets the run.
+                        attr_run_start = None;
+                    }
                     at_line_start = false;
                 }
             }
@@ -281,6 +319,7 @@ where
         let body_start = body_start_span.start;
 
         let mut at_line_start = true;
+        let mut ended_by_heading = false;
         loop {
             match inp.peek() {
                 None => break,
@@ -300,6 +339,7 @@ where
                         let check_level = count - 1;
                         if check_level <= level {
                             inp.rewind(check_before);
+                            ended_by_heading = true;
                             break;
                         }
                     }
@@ -317,6 +357,7 @@ where
                         let check_level = count - 1;
                         if check_level <= level {
                             inp.rewind(check_before);
+                            ended_by_heading = true;
                             break;
                         }
                     }
@@ -331,7 +372,11 @@ where
 
         let body_end_span: SourceSpan = inp.span_since(&body_cursor);
         let body_end = body_end_span.end;
-        let actual_body_end = trim_trailing_newlines(source, body_start, body_end);
+        let actual_body_end = if ended_by_heading {
+            trim_trailing_block_attrs(source, body_start, body_end)
+        } else {
+            trim_trailing_newlines(source, body_start, body_end)
+        };
 
         Ok(build_section_block(
             &SectionParams {
@@ -452,6 +497,7 @@ where
         let body_start = body_start_span.start;
 
         let mut at_line_start = true;
+        let mut ended_by_heading = false;
         loop {
             match inp.peek() {
                 None => break,
@@ -470,6 +516,7 @@ where
                         let check_level = count - 1;
                         if check_level <= level {
                             inp.rewind(check_before);
+                            ended_by_heading = true;
                             break;
                         }
                     }
@@ -484,13 +531,11 @@ where
 
         let body_end_span: SourceSpan = inp.span_since(&body_cursor);
         let body_end = body_end_span.end;
-
-        let mut actual_body_end = body_end;
-        while actual_body_end > body_start
-            && source.as_bytes().get(actual_body_end - 1) == Some(&b'\n')
-        {
-            actual_body_end -= 1;
-        }
+        let actual_body_end = if ended_by_heading {
+            trim_trailing_block_attrs(source, body_start, body_end)
+        } else {
+            trim_trailing_newlines(source, body_start, body_end)
+        };
 
         let mut block = RawBlock::new("section");
         block.level = Some(level);

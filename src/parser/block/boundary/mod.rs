@@ -599,8 +599,8 @@ mod tests {
 
         assert_eq!(meta.style, Some("source"));
         assert_eq!(meta.id, Some("myid"));
-        assert_eq!(meta.roles, vec!["role1", "role2"]);
-        assert_eq!(meta.options, vec!["opt1"]);
+        assert_eq!(meta.roles.as_slice(), &["role1", "role2"]);
+        assert_eq!(meta.options.as_slice(), &["opt1"]);
     }
 
     #[test]

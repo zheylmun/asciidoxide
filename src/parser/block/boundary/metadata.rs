@@ -54,7 +54,7 @@ pub(super) fn parse_attr_content(content: &str) -> PendingMetadata<'_> {
                 if key == "id" {
                     meta.id = Some(value);
                 } else {
-                    meta.named_attributes.insert(key, value);
+                    meta.named_attributes.push((key, value));
                 }
             }
             continue;

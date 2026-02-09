@@ -290,7 +290,7 @@ where
 
                         // Store language as a positional for transform to pick up
                         if let Some(lang) = language {
-                            block.positionals = vec!["", lang];
+                            block.positionals = smallvec::smallvec!["", lang];
                         }
 
                         return Ok(block);
