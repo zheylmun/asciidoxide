@@ -4,7 +4,7 @@ version = "0.0.1"
 schema_version = 1
 authors = ["Zachary Heylmun <zheylmun@gmail.com>"]
 description = "Asciidoc language server protocol support for Zed."
-repository = "https://github.com/your-name/my-zed-extension"
+repository = "https://github.com/zheylmun/asciidoxide"
 
 [language_servers.asciidoc-language-server]
 name = "Asciidoc Language Server"
