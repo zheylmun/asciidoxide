@@ -15,113 +15,114 @@ cargo install --path crates/lsp
 The binary `asciidoxide-lsp` communicates over stdin/stdout using the LSP protocol.
 Editor extensions (such as the link:../../editors/zed/[Zed extension]) discover it in `PATH`.
 
-== Current Status
+== Roadmap
 
-[cols="1,3,1"]
+[cols="2,4,1,1"]
 |===
-| Feature | Description | Status
+| Feature | Description | Phase | Status
+
+4+h| Foundation
 
 | Text document sync
 | Full document sync on open, change, and close
+| —
 | Done
 
 | Diagnostics
 | Real-time parse errors and warnings published on every edit
+| —
 | Done
+
+4+h| Phase 1: Navigation
+
+| Document symbols
+| Document outline as a nested symbol hierarchy. Sections with level/title/range, blocks as children of their containing section. Uses `block.name`, `block.level`, `block.title`.
+| 1
+| Planned
+
+| Folding ranges
+| Collapse structural regions. Sections fold to the next sibling, delimited blocks (`block.delimiter`) fold between fences, lists fold from first to last item.
+| 1
+| Planned
+
+| Go to definition
+| Navigate from `\<<target>>` cross-references to the block with the matching `id`. `RefNode(variant: "xref")` → `Block(id)` lookup.
+| 1
+| Planned
+
+4+h| Phase 2: Intelligence
+
+| Hover
+| Contextual info on hover. Section headings: level, ID, roles/options. Cross-references: resolved target title and location. Attribute references: current value. Inline macros: target and parameters.
+| 2
+| Planned
+
+| Completion
+| Context-aware suggestions. `\<<` triggers xref target completion from block IDs. `{` triggers attribute name completion. Attribute lists suggest valid styles (`source`, `quote`, `verse`, `abstract`, `appendix`, etc.). Include targets suggest relative file paths.
+| 2
+| Planned
+
+| Find references
+| Given a block ID, find all `RefNode` cross-references targeting it. Reveals how sections and anchors are linked within a document.
+| 2
+| Planned
+
+4+h| Phase 3: Editing Support
+
+| Code actions
+| Quick fixes tied to diagnostics. Unresolved xref → create target anchor. Auto-generated ID referenced → suggest adding explicit ID.
+| 3
+| Planned
+
+| Rename
+| Rename a block ID and update all cross-references pointing to it. Shares the ID-to-xref index with go-to-definition and find-references.
+| 3
+| Planned
+
+| Formatting
+| Basic formatting support. Normalize list markers, heading styles, and attribute list spacing. Integrate with a dedicated formatter when one exists.
+| 3
+| Planned
+
+4+h| Phase 4: Semantic Tokens
+
+| Inline spans
+| Classify `SpanNode` variants (`strong`, `emphasis`, `code`, `mark`, `superscript`, `subscript`) and forms (`constrained` vs `unconstrained`) as distinct token types.
+| 4
+| Planned
+
+| Links and cross-references
+| Distinguish `RefNode` variants (`link` vs `xref`). Separately classify target and display text.
+| 4
+| Planned
+
+| Passthroughs
+| Mark `RawNode` content so editors visually distinguish passthrough regions.
+| 4
+| Planned
+
+| Block metadata
+| Classify roles, options, and attribute key/value pairs in block attribute lists.
+| 4
+| Planned
+
+4+h| Phase 5: Multi-file and Workspace
+
+| Workspace symbols
+| Index block IDs and section titles across all open documents. Cross-file go-to-definition for inter-document cross-references.
+| 5
+| Planned
+
+| Include resolution
+| Resolve `include::` directives. Diagnostics for missing files, go-to-definition into included content, cross-file symbol indexing.
+| 5
+| Planned
+
+| Code lens
+| Display reference counts inline above block IDs, showing how many cross-references point to each anchor.
+| 5
+| Planned
 |===
-
-== Roadmap
-
-=== Phase 1: Navigation
-
-Provide the structural awareness needed to move around documents efficiently.
-
-Document symbols::
-Expose the document outline as a symbol hierarchy.
-Sections become nested ``DocumentSymbol``s with their level, title, and range.
-Top-level blocks (listing, sidebar, table, etc.) appear as children of their containing section.
-The ASG provides `block.name`, `block.level`, `block.title`, and locations for all of these.
-
-Folding ranges::
-Allow editors to collapse structural regions.
-Sections fold from their heading to the start of the next sibling section.
-Delimited blocks (identified by `block.delimiter`) fold between their opening and closing fences.
-List structures fold from the first item to the last.
-
-Go to definition::
-Navigate from a cross-reference to its target.
-`RefNode` with `variant == "xref"` carries a `target` field containing the destination block ID.
-`Block` nodes carry an optional `id` field.
-Resolution is a lookup from `xref.target` to the block whose `id` matches.
-
-=== Phase 2: Intelligence
-
-Surface contextual information and reduce typing.
-
-Hover::
-Display useful information when hovering over ASG elements.
-Over a section heading: show the section level, ID, and any roles or options from `BlockMetadata`.
-Over a cross-reference: show the resolved target's title and location.
-Over an attribute reference: show the attribute's current value.
-Over an inline macro: show the macro target and parsed parameters.
-
-Completion::
-Suggest context-appropriate completions.
-Cross-reference targets: collect all block IDs from the document and offer them when typing `\<<`.
-Attribute names: offer known document attributes when typing `{`.
-Block styles: suggest valid styles (`source`, `quote`, `verse`, `abstract`, `appendix`, etc.) inside attribute lists.
-Include targets: suggest files relative to the document path.
-
-Find references::
-Given a block ID, find all `RefNode` cross-references that target it.
-Useful for understanding how sections and blocks are linked within a document.
-
-=== Phase 3: Editing Support
-
-Help authors write and refactor documents.
-
-Code actions::
-Offer quick fixes tied to diagnostics.
-For example, if a cross-reference target doesn't resolve, offer to create the target anchor.
-Suggest adding an explicit ID to a section that is referenced by auto-generated ID.
-
-Rename::
-Rename a block ID and update all cross-references that point to it.
-Uses the same ID-to-xref index as go-to-definition and find-references.
-
-Formatting::
-Integrate with an AsciiDoc formatter (when one exists) or provide basic formatting.
-Normalize list markers, heading styles, and attribute list spacing.
-
-=== Phase 4: Semantic Tokens
-
-Provide token-level classification for richer editor highlighting than tree-sitter grammars alone.
-
-Inline spans::
-Classify `SpanNode` variants (`strong`, `emphasis`, `code`, `mark`, `superscript`, `subscript`) and forms (`constrained` vs `unconstrained`) as distinct token types.
-
-Links and cross-references::
-Distinguish `RefNode` variants (`link` vs `xref`) and separately classify the target and display text.
-
-Passthroughs::
-Mark `RawNode` content so editors can visually distinguish passthrough regions.
-
-Block metadata::
-Classify roles, options, and attribute keys/values in block attribute lists.
-
-=== Phase 5: Multi-file and Workspace
-
-Extend awareness beyond a single document.
-
-Workspace symbols::
-Index block IDs and section titles across all open documents.
-Support cross-file go-to-definition for inter-document cross-references.
-
-Include directive resolution::
-Resolve `include::` directives to provide diagnostics for missing files, go-to-definition into included content, and accurate cross-file symbol indexing.
-
-Code lens::
-Display reference counts inline above block IDs, showing how many cross-references point to each anchor.
 
 == Architecture
 
