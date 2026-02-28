@@ -4,9 +4,9 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::{
     DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
     DocumentSymbolParams, DocumentSymbolResponse, FoldingRange, FoldingRangeParams,
-    FoldingRangeProviderCapability, GotoDefinitionParams, GotoDefinitionResponse, InitializeParams,
-    InitializeResult, InitializedParams, Location, OneOf, ServerCapabilities,
-    TextDocumentSyncCapability, TextDocumentSyncKind, Url,
+    FoldingRangeProviderCapability, GotoDefinitionParams, GotoDefinitionResponse, Hover,
+    HoverParams, HoverProviderCapability, InitializeParams, InitializeResult, InitializedParams,
+    Location, OneOf, ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind, Url,
 };
 use tower_lsp::{Client, LanguageServer};
 
@@ -44,6 +44,7 @@ impl LanguageServer for Backend {
                 )),
                 document_symbol_provider: Some(OneOf::Left(true)),
                 definition_provider: Some(OneOf::Left(true)),
+                hover_provider: Some(HoverProviderCapability::Simple(true)),
                 folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
                 ..ServerCapabilities::default()
             },
@@ -128,6 +129,19 @@ impl LanguageServer for Backend {
             .get(&uri_str)
             .and_then(|entry| entry.goto_definition(position));
         Ok(range.map(|r| GotoDefinitionResponse::Scalar(Location { uri, range: r })))
+    }
+
+    async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
+        let uri = params
+            .text_document_position_params
+            .text_document
+            .uri
+            .to_string();
+        let position = params.text_document_position_params.position;
+        Ok(self
+            .document_map
+            .get(&uri)
+            .and_then(|entry| entry.hover(position)))
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {

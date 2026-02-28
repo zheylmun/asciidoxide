@@ -1,20 +1,7 @@
-use asciidoxide_parser::asg::{Document, InlineNode};
+use asciidoxide_parser::asg::Document;
 use tower_lsp::lsp_types::{DocumentSymbol, SymbolKind};
 
-use crate::util::{asg_location_to_lsp_range, zero_range};
-
-fn inlines_to_text(inlines: &[InlineNode]) -> String {
-    let mut out = String::new();
-    for node in inlines {
-        match node {
-            InlineNode::Text(t) => out.push_str(t.value),
-            InlineNode::Span(s) => out.push_str(&inlines_to_text(&s.inlines)),
-            InlineNode::Ref(r) => out.push_str(&inlines_to_text(&r.inlines)),
-            InlineNode::Raw(r) => out.push_str(r.value),
-        }
-    }
-    out
-}
+use crate::util::{asg_location_to_lsp_range, inlines_to_text, zero_range};
 
 fn blocks_to_symbols(blocks: &[asciidoxide_parser::asg::Block]) -> Vec<DocumentSymbol> {
     let mut symbols = Vec::new();

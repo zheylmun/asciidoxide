@@ -2,11 +2,12 @@ use asciidoxide_parser::asg::Document;
 use asciidoxide_parser::diagnostic::ParseDiagnostic;
 use asciidoxide_parser::span::SourceIndex;
 use self_cell::self_cell;
-use tower_lsp::lsp_types::{Diagnostic, DocumentSymbol, FoldingRange, Position, Range};
+use tower_lsp::lsp_types::{Diagnostic, DocumentSymbol, FoldingRange, Hover, Position, Range};
 
 use crate::definition::find_definition;
 use crate::diagnostics::to_lsp_diagnostics;
 use crate::folding::build_folding_ranges;
+use crate::hover::build_hover;
 use crate::symbols::build_document_symbols;
 
 self_cell! {
@@ -83,5 +84,12 @@ impl DocumentState {
     pub fn goto_definition(&self, position: Position) -> Option<Range> {
         self.parsed
             .with_dependent(|_source, doc| find_definition(doc, position))
+    }
+
+    /// Build hover information for the element at the given position.
+    #[must_use]
+    pub fn hover(&self, position: Position) -> Option<Hover> {
+        self.parsed
+            .with_dependent(|_source, doc| build_hover(doc, position))
     }
 }

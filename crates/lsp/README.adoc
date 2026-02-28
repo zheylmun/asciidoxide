@@ -55,7 +55,7 @@ Editor extensions (such as the link:../../editors/zed/[Zed extension]) discover 
 | Hover
 | Contextual info on hover. Section headings: level, ID, roles/options. Cross-references: resolved target title and location. Attribute references: current value. Inline macros: target and parameters.
 | 2
-| Planned
+| Done
 
 | Completion
 | Context-aware suggestions. `\<<` triggers xref target completion from block IDs. `{` triggers attribute name completion. Attribute lists suggest valid styles (`source`, `quote`, `verse`, `abstract`, `appendix`, etc.). Include targets suggest relative file paths.
@@ -136,6 +136,7 @@ diagnostics.rs ParseDiagnostic → LSP Diagnostic conversion
 symbols.rs     ASG → DocumentSymbol conversion for document outline
 folding.rs     ASG → FoldingRange conversion for collapsible regions
 definition.rs  xref → block ID go-to-definition lookup
+hover.rs       ASG traversal for contextual hover information
 util.rs        Shared LSP position/range conversion helpers
 ----
 

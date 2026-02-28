@@ -1,27 +1,7 @@
 use asciidoxide_parser::asg::{Block, Document, InlineNode, Location};
 use tower_lsp::lsp_types::{Position as LspPosition, Range};
 
-use crate::util::asg_location_to_lsp_range;
-
-/// Check whether an ASG location (1-based, end-inclusive) contains a given LSP position (0-based).
-fn location_contains(loc: &Location, pos: LspPosition) -> bool {
-    let line = pos.line as usize + 1;
-    let col = pos.character as usize + 1;
-
-    let start = &loc[0];
-    let end = &loc[1];
-
-    if line < start.line || line > end.line {
-        return false;
-    }
-    if line == start.line && col < start.col {
-        return false;
-    }
-    if line == end.line && col > end.col {
-        return false;
-    }
-    true
-}
+use crate::util::{asg_location_to_lsp_range, location_contains};
 
 /// Find the xref target at the given cursor position by walking inline nodes.
 fn find_xref_in_inlines<'a>(inlines: &[InlineNode<'a>], pos: LspPosition) -> Option<&'a str> {
