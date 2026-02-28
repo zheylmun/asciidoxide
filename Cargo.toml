@@ -1,3 +1,4 @@
 [workspace]
-members = ["crates/*"]
+members = ["crates/*", "editors/zed"]
+default-members = ["crates/*"]
 resolver = "3"
