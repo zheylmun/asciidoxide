@@ -1,0 +1,16 @@
+[package]
+name = "asciidoxide-lsp"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "asciidoxide-lsp"
+path = "src/main.rs"
+
+[dependencies]
+asciidoxide-parser = { path = "../parser" }
+tower-lsp = "0.20"
+tokio = { version = "1", features = ["io-std", "macros", "rt-multi-thread"] }
+dashmap = "5"
+self_cell = "1"
