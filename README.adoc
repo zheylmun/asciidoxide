@@ -1,0 +1,40 @@
+= asciidoxide
+:url-repo: https://github.com/zheylmun/asciidoxide
+
+image:{url-repo}/actions/workflows/ci.yml/badge.svg?branch=main[CI,link={url-repo}/actions/workflows/ci.yml]
+image:https://img.shields.io/codecov/c/github/zheylmun/asciidoxide?style=for-the-badge&logo=codecov[Codecov,link=https://codecov.io/gh/zheylmun/asciidoxide]
+image:https://img.shields.io/endpoint?url=https://codspeed.io/badge.json&style=for-the-badge[CodSpeed,link=https://codspeed.io/zheylmun/asciidoxide]
+
+AsciiDoc tooling written in Rust.
+
+== Crates
+
+link:crates/parser/[`asciidoxide-parser`]::
+Zero-copy, spec-compliant AsciiDoc parser producing an Abstract Semantic Graph (ASG).
+See the link:crates/parser/README.adoc[parser README] for details on testing, project structure, and the TCK harness.
+
+link:crates/lsp/[`asciidoxide-lsp`]::
+Language Server Protocol server built on the parser.
+Provides real-time diagnostics via https://github.com/ebkalderon/tower-lsp[tower-lsp].
++
+[source,bash]
+----
+cargo install --path crates/lsp
+----
+
+== Editor Extensions
+
+link:editors/zed/[Zed]::
+Zed editor extension that discovers `asciidoxide-lsp` in PATH and provides AsciiDoc syntax highlighting via https://github.com/cathaysia/tree-sitter-asciidoc[tree-sitter-asciidoc].
+
+== Building
+
+[source,bash]
+----
+cargo build            # Build parser + LSP (default members)
+cargo build --workspace  # Build everything including editor extensions
+----
+
+== License
+
+Licensed under either of link:LICENSE-APACHE[Apache License, Version 2.0] or link:LICENSE-MIT[MIT license] at your option.
