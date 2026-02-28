@@ -1,2 +1,5 @@
 /target
 .DS_Store
+editors/zed/grammars/
+editors/zed/extension.wasm
+editors/zed/target/
