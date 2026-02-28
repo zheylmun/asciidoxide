@@ -38,7 +38,7 @@ Editor extensions (such as the link:../../editors/zed/[Zed extension]) discover 
 | Document symbols
 | Document outline as a nested symbol hierarchy. Sections with level/title/range, blocks as children of their containing section. Uses `block.name`, `block.level`, `block.title`.
 | 1
-| Planned
+| Done
 
 | Folding ranges
 | Collapse structural regions. Sections fold to the next sibling, delimited blocks (`block.delimiter`) fold between fences, lists fold from first to last item.
@@ -133,6 +133,7 @@ lib.rs         Module exports
 backend.rs     LanguageServer trait implementation, document lifecycle
 document.rs    Self-referential document storage (self_cell), on-demand SourceIndex
 diagnostics.rs ParseDiagnostic → LSP Diagnostic conversion
+symbols.rs     ASG → DocumentSymbol conversion for document outline
 ----
 
 The server re-parses the full document on every change (`TextDocumentSyncKind::FULL`).

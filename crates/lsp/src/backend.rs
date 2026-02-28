@@ -3,8 +3,9 @@ use dashmap::DashMap;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::{
     DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-    InitializeParams, InitializeResult, InitializedParams, ServerCapabilities,
-    TextDocumentSyncCapability, TextDocumentSyncKind, Url,
+    DocumentSymbolParams, DocumentSymbolResponse, InitializeParams, InitializeResult,
+    InitializedParams, OneOf, ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind,
+    Url,
 };
 use tower_lsp::{Client, LanguageServer};
 
@@ -40,6 +41,7 @@ impl LanguageServer for Backend {
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(
                     TextDocumentSyncKind::FULL,
                 )),
+                document_symbol_provider: Some(OneOf::Left(true)),
                 ..ServerCapabilities::default()
             },
             ..InitializeResult::default()
@@ -86,6 +88,19 @@ impl LanguageServer for Backend {
                 self.publish_diagnostics(&uri, &entry).await;
             }
         }
+    }
+
+    async fn document_symbol(
+        &self,
+        params: DocumentSymbolParams,
+    ) -> Result<Option<DocumentSymbolResponse>> {
+        let uri = params.text_document.uri.to_string();
+        let symbols = self
+            .document_map
+            .get(&uri)
+            .map(|entry| entry.document_symbols())
+            .unwrap_or_default();
+        Ok(Some(DocumentSymbolResponse::Nested(symbols)))
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {

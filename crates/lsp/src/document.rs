@@ -2,9 +2,10 @@ use asciidoxide_parser::asg::Document;
 use asciidoxide_parser::diagnostic::ParseDiagnostic;
 use asciidoxide_parser::span::SourceIndex;
 use self_cell::self_cell;
-use tower_lsp::lsp_types::Diagnostic;
+use tower_lsp::lsp_types::{Diagnostic, DocumentSymbol};
 
 use crate::diagnostics::to_lsp_diagnostics;
+use crate::symbols::build_document_symbols;
 
 self_cell! {
     struct ParsedDocument {
@@ -59,5 +60,12 @@ impl DocumentState {
     pub fn lsp_diagnostics(&self) -> Vec<Diagnostic> {
         let idx = SourceIndex::new(self.parsed.borrow_owner());
         to_lsp_diagnostics(&self.diagnostics, &idx)
+    }
+
+    /// Build document symbols from the parsed ASG.
+    #[must_use]
+    pub fn document_symbols(&self) -> Vec<DocumentSymbol> {
+        self.parsed
+            .with_dependent(|_source, doc| build_document_symbols(doc))
     }
 }
