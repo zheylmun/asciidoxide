@@ -2,8 +2,9 @@ use asciidoxide_parser::asg::Document;
 use asciidoxide_parser::diagnostic::ParseDiagnostic;
 use asciidoxide_parser::span::SourceIndex;
 use self_cell::self_cell;
-use tower_lsp::lsp_types::{Diagnostic, DocumentSymbol, FoldingRange};
+use tower_lsp::lsp_types::{Diagnostic, DocumentSymbol, FoldingRange, Position, Range};
 
+use crate::definition::find_definition;
 use crate::diagnostics::to_lsp_diagnostics;
 use crate::folding::build_folding_ranges;
 use crate::symbols::build_document_symbols;
@@ -75,5 +76,12 @@ impl DocumentState {
     pub fn folding_ranges(&self) -> Vec<FoldingRange> {
         self.parsed
             .with_dependent(|_source, doc| build_folding_ranges(doc))
+    }
+
+    /// Find the definition target for a cross-reference at the given position.
+    #[must_use]
+    pub fn goto_definition(&self, position: Position) -> Option<Range> {
+        self.parsed
+            .with_dependent(|_source, doc| find_definition(doc, position))
     }
 }

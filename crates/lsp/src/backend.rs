@@ -4,8 +4,9 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::{
     DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
     DocumentSymbolParams, DocumentSymbolResponse, FoldingRange, FoldingRangeParams,
-    FoldingRangeProviderCapability, InitializeParams, InitializeResult, InitializedParams, OneOf,
-    ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind, Url,
+    FoldingRangeProviderCapability, GotoDefinitionParams, GotoDefinitionResponse, InitializeParams,
+    InitializeResult, InitializedParams, Location, OneOf, ServerCapabilities,
+    TextDocumentSyncCapability, TextDocumentSyncKind, Url,
 };
 use tower_lsp::{Client, LanguageServer};
 
@@ -42,6 +43,7 @@ impl LanguageServer for Backend {
                     TextDocumentSyncKind::FULL,
                 )),
                 document_symbol_provider: Some(OneOf::Left(true)),
+                definition_provider: Some(OneOf::Left(true)),
                 folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
                 ..ServerCapabilities::default()
             },
@@ -112,6 +114,20 @@ impl LanguageServer for Backend {
             .map(|entry| entry.folding_ranges())
             .unwrap_or_default();
         Ok(Some(ranges))
+    }
+
+    async fn goto_definition(
+        &self,
+        params: GotoDefinitionParams,
+    ) -> Result<Option<GotoDefinitionResponse>> {
+        let uri = params.text_document_position_params.text_document.uri;
+        let position = params.text_document_position_params.position;
+        let uri_str = uri.to_string();
+        let range = self
+            .document_map
+            .get(&uri_str)
+            .and_then(|entry| entry.goto_definition(position));
+        Ok(range.map(|r| GotoDefinitionResponse::Scalar(Location { uri, range: r })))
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {

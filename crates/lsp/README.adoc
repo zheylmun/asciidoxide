@@ -48,7 +48,7 @@ Editor extensions (such as the link:../../editors/zed/[Zed extension]) discover 
 | Go to definition
 | Navigate from `\<<target>>` cross-references to the block with the matching `id`. `RefNode(variant: "xref")` → `Block(id)` lookup.
 | 1
-| Planned
+| Done
 
 4+h| Phase 2: Intelligence
 
@@ -135,6 +135,8 @@ document.rs    Self-referential document storage (self_cell), on-demand SourceIn
 diagnostics.rs ParseDiagnostic → LSP Diagnostic conversion
 symbols.rs     ASG → DocumentSymbol conversion for document outline
 folding.rs     ASG → FoldingRange conversion for collapsible regions
+definition.rs  xref → block ID go-to-definition lookup
+util.rs        Shared LSP position/range conversion helpers
 ----
 
 The server re-parses the full document on every change (`TextDocumentSyncKind::FULL`).
