@@ -3,9 +3,9 @@ use dashmap::DashMap;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::{
     DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-    DocumentSymbolParams, DocumentSymbolResponse, InitializeParams, InitializeResult,
-    InitializedParams, OneOf, ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind,
-    Url,
+    DocumentSymbolParams, DocumentSymbolResponse, FoldingRange, FoldingRangeParams,
+    FoldingRangeProviderCapability, InitializeParams, InitializeResult, InitializedParams, OneOf,
+    ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind, Url,
 };
 use tower_lsp::{Client, LanguageServer};
 
@@ -42,6 +42,7 @@ impl LanguageServer for Backend {
                     TextDocumentSyncKind::FULL,
                 )),
                 document_symbol_provider: Some(OneOf::Left(true)),
+                folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
                 ..ServerCapabilities::default()
             },
             ..InitializeResult::default()
@@ -101,6 +102,16 @@ impl LanguageServer for Backend {
             .map(|entry| entry.document_symbols())
             .unwrap_or_default();
         Ok(Some(DocumentSymbolResponse::Nested(symbols)))
+    }
+
+    async fn folding_range(&self, params: FoldingRangeParams) -> Result<Option<Vec<FoldingRange>>> {
+        let uri = params.text_document.uri.to_string();
+        let ranges = self
+            .document_map
+            .get(&uri)
+            .map(|entry| entry.folding_ranges())
+            .unwrap_or_default();
+        Ok(Some(ranges))
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {

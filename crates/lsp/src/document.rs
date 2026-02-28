@@ -2,9 +2,10 @@ use asciidoxide_parser::asg::Document;
 use asciidoxide_parser::diagnostic::ParseDiagnostic;
 use asciidoxide_parser::span::SourceIndex;
 use self_cell::self_cell;
-use tower_lsp::lsp_types::{Diagnostic, DocumentSymbol};
+use tower_lsp::lsp_types::{Diagnostic, DocumentSymbol, FoldingRange};
 
 use crate::diagnostics::to_lsp_diagnostics;
+use crate::folding::build_folding_ranges;
 use crate::symbols::build_document_symbols;
 
 self_cell! {
@@ -67,5 +68,12 @@ impl DocumentState {
     pub fn document_symbols(&self) -> Vec<DocumentSymbol> {
         self.parsed
             .with_dependent(|_source, doc| build_document_symbols(doc))
+    }
+
+    /// Build folding ranges from the parsed ASG.
+    #[must_use]
+    pub fn folding_ranges(&self) -> Vec<FoldingRange> {
+        self.parsed
+            .with_dependent(|_source, doc| build_folding_ranges(doc))
     }
 }

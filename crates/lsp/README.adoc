@@ -43,7 +43,7 @@ Editor extensions (such as the link:../../editors/zed/[Zed extension]) discover 
 | Folding ranges
 | Collapse structural regions. Sections fold to the next sibling, delimited blocks (`block.delimiter`) fold between fences, lists fold from first to last item.
 | 1
-| Planned
+| Done
 
 | Go to definition
 | Navigate from `\<<target>>` cross-references to the block with the matching `id`. `RefNode(variant: "xref")` → `Block(id)` lookup.
@@ -134,6 +134,7 @@ backend.rs     LanguageServer trait implementation, document lifecycle
 document.rs    Self-referential document storage (self_cell), on-demand SourceIndex
 diagnostics.rs ParseDiagnostic → LSP Diagnostic conversion
 symbols.rs     ASG → DocumentSymbol conversion for document outline
+folding.rs     ASG → FoldingRange conversion for collapsible regions
 ----
 
 The server re-parses the full document on every change (`TextDocumentSyncKind::FULL`).
