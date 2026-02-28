@@ -54,7 +54,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "asciidoxide"
+name = "asciidoxide-parser"
 version = "0.1.0"
 dependencies = [
  "chumsky",

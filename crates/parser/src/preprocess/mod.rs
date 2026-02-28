@@ -14,7 +14,7 @@
 //!
 //! ```
 //! use std::collections::HashMap;
-//! use asciidoxide::preprocess::preprocess;
+//! use asciidoxide_parser::preprocess::preprocess;
 //!
 //! let input = "ifdef::debug[]\nDebug mode enabled\nendif::[]";
 //! let attrs = HashMap::from([("debug".to_string(), "true".to_string())]);

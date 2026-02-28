@@ -1,4 +1,4 @@
-#![doc = include_str!("../README.md")]
+#![doc = include_str!("../../../README.md")]
 #![deny(missing_docs, unsafe_code)]
 
 pub mod asg;
@@ -20,7 +20,7 @@ use diagnostic::ParseDiagnostic;
 ///
 /// ```
 /// use std::collections::HashMap;
-/// use asciidoxide::{preprocess, parse_document};
+/// use asciidoxide_parser::{preprocess, parse_document};
 ///
 /// let input = "ifdef::debug[]\nDebug mode\nendif::[]";
 /// let attrs = HashMap::from([("debug".to_string(), "true".to_string())]);

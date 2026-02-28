@@ -2,7 +2,7 @@
 //!
 //! Benchmarks inline parsing, block parsing, and batch processing of TCK files.
 
-use asciidoxide::{parse_document, parse_inline};
+use asciidoxide_parser::{parse_document, parse_inline};
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use std::fs;
 use std::path::Path;
@@ -26,8 +26,8 @@ fn collect_adoc_files(dir: &Path, inputs: &mut Vec<(String, String)>) {
 
 /// Load TCK input files for batch benchmarking.
 fn load_tck_inputs() -> Vec<(String, String)> {
-    let tck_tests_dir =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("language_repositories/asciidoc_tck/tests");
+    let tck_tests_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../language_repositories/asciidoc_tck/tests");
 
     let mut inputs = Vec::new();
     collect_adoc_files(&tck_tests_dir, &mut inputs);

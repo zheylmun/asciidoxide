@@ -8,8 +8,8 @@
 //! types via `From` impls, injecting the constant `name`/`type` fields that the
 //! TCK JSON format requires.
 
-use asciidoxide::asg;
-use asciidoxide::{parse_document, parse_inline};
+use asciidoxide_parser::asg;
+use asciidoxide_parser::{parse_document, parse_inline};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -375,7 +375,7 @@ struct TckFixture {
 // --- Discovery ---
 
 fn tck_tests_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("language_repositories/asciidoc_tck/tests")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../language_repositories/asciidoc_tck/tests")
 }
 
 fn discover_fixtures() -> Vec<TckFixture> {

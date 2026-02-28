@@ -6,8 +6,8 @@
 //!
 //! The harness invokes this same binary with the env var set to get parser output.
 
-use asciidoxide::asg;
-use asciidoxide::{parse_document, parse_inline};
+use asciidoxide_parser::asg;
+use asciidoxide_parser::{parse_document, parse_inline};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
@@ -30,7 +30,7 @@ fn main() {
 fn run_harness() {
     let exe_path = std::env::current_exe().expect("Failed to get current executable path");
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let tck_dir = Path::new(manifest_dir).join("language_repositories/asciidoc_tck");
+    let tck_dir = Path::new(manifest_dir).join("../../language_repositories/asciidoc_tck");
 
     // Build the adapter command that sets the env var and runs this binary
     // We use a shell wrapper to set the environment variable
