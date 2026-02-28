@@ -1,7 +1,7 @@
 //! High performance [AsciiDoc](https://asciidoc.org) lexer and parser library
 //! written in safe Rust.
 //!
-//! This crate provides a zero-copy, spec-compliant AsciiDoc parser that
+//! This crate provides a zero-copy, spec-compliant `AsciiDoc` parser that
 //! produces an Abstract Semantic Graph (ASG). It uses
 //! [chumsky](https://github.com/zesterer/chumsky) for lexing and parsing.
 //!
