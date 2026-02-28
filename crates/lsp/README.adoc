@@ -1,0 +1,143 @@
+= asciidoxide-lsp
+:url-repo: https://github.com/zheylmun/asciidoxide
+:url-lsp-spec: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification
+:url-tower-lsp: https://github.com/ebkalderon/tower-lsp
+
+Language Server Protocol implementation for https://asciidoc.org[AsciiDoc], built on the link:../parser/[asciidoxide-parser].
+
+== Installation
+
+[source,bash]
+----
+cargo install --path crates/lsp
+----
+
+The binary `asciidoxide-lsp` communicates over stdin/stdout using the LSP protocol.
+Editor extensions (such as the link:../../editors/zed/[Zed extension]) discover it in `PATH`.
+
+== Current Status
+
+[cols="1,3,1"]
+|===
+| Feature | Description | Status
+
+| Text document sync
+| Full document sync on open, change, and close
+| Done
+
+| Diagnostics
+| Real-time parse errors and warnings published on every edit
+| Done
+|===
+
+== Roadmap
+
+=== Phase 1: Navigation
+
+Provide the structural awareness needed to move around documents efficiently.
+
+Document symbols::
+Expose the document outline as a symbol hierarchy.
+Sections become nested ``DocumentSymbol``s with their level, title, and range.
+Top-level blocks (listing, sidebar, table, etc.) appear as children of their containing section.
+The ASG provides `block.name`, `block.level`, `block.title`, and locations for all of these.
+
+Folding ranges::
+Allow editors to collapse structural regions.
+Sections fold from their heading to the start of the next sibling section.
+Delimited blocks (identified by `block.delimiter`) fold between their opening and closing fences.
+List structures fold from the first item to the last.
+
+Go to definition::
+Navigate from a cross-reference to its target.
+`RefNode` with `variant == "xref"` carries a `target` field containing the destination block ID.
+`Block` nodes carry an optional `id` field.
+Resolution is a lookup from `xref.target` to the block whose `id` matches.
+
+=== Phase 2: Intelligence
+
+Surface contextual information and reduce typing.
+
+Hover::
+Display useful information when hovering over ASG elements.
+Over a section heading: show the section level, ID, and any roles or options from `BlockMetadata`.
+Over a cross-reference: show the resolved target's title and location.
+Over an attribute reference: show the attribute's current value.
+Over an inline macro: show the macro target and parsed parameters.
+
+Completion::
+Suggest context-appropriate completions.
+Cross-reference targets: collect all block IDs from the document and offer them when typing `\<<`.
+Attribute names: offer known document attributes when typing `{`.
+Block styles: suggest valid styles (`source`, `quote`, `verse`, `abstract`, `appendix`, etc.) inside attribute lists.
+Include targets: suggest files relative to the document path.
+
+Find references::
+Given a block ID, find all `RefNode` cross-references that target it.
+Useful for understanding how sections and blocks are linked within a document.
+
+=== Phase 3: Editing Support
+
+Help authors write and refactor documents.
+
+Code actions::
+Offer quick fixes tied to diagnostics.
+For example, if a cross-reference target doesn't resolve, offer to create the target anchor.
+Suggest adding an explicit ID to a section that is referenced by auto-generated ID.
+
+Rename::
+Rename a block ID and update all cross-references that point to it.
+Uses the same ID-to-xref index as go-to-definition and find-references.
+
+Formatting::
+Integrate with an AsciiDoc formatter (when one exists) or provide basic formatting.
+Normalize list markers, heading styles, and attribute list spacing.
+
+=== Phase 4: Semantic Tokens
+
+Provide token-level classification for richer editor highlighting than tree-sitter grammars alone.
+
+Inline spans::
+Classify `SpanNode` variants (`strong`, `emphasis`, `code`, `mark`, `superscript`, `subscript`) and forms (`constrained` vs `unconstrained`) as distinct token types.
+
+Links and cross-references::
+Distinguish `RefNode` variants (`link` vs `xref`) and separately classify the target and display text.
+
+Passthroughs::
+Mark `RawNode` content so editors can visually distinguish passthrough regions.
+
+Block metadata::
+Classify roles, options, and attribute keys/values in block attribute lists.
+
+=== Phase 5: Multi-file and Workspace
+
+Extend awareness beyond a single document.
+
+Workspace symbols::
+Index block IDs and section titles across all open documents.
+Support cross-file go-to-definition for inter-document cross-references.
+
+Include directive resolution::
+Resolve `include::` directives to provide diagnostics for missing files, go-to-definition into included content, and accurate cross-file symbol indexing.
+
+Code lens::
+Display reference counts inline above block IDs, showing how many cross-references point to each anchor.
+
+== Architecture
+
+[source,text]
+----
+main.rs        Entry point: stdin/stdout transport via tower-lsp
+lib.rs         Module exports
+backend.rs     LanguageServer trait implementation, document lifecycle
+document.rs    Self-referential document storage (self_cell), on-demand SourceIndex
+diagnostics.rs ParseDiagnostic → LSP Diagnostic conversion
+----
+
+The server re-parses the full document on every change (`TextDocumentSyncKind::FULL`).
+The ASG and diagnostics are cached in a `DashMap<String, DocumentState>` keyed by document URI.
+`SourceIndex` is constructed on demand when converting byte-offset spans to LSP positions.
+
+== License
+
+Licensed under either of link:../../LICENSE-APACHE[Apache License, Version 2.0] or link:../../LICENSE-MIT[MIT license] at your option.
