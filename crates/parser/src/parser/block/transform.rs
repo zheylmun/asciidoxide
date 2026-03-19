@@ -269,170 +269,533 @@ fn handle_list_item_content<'src>(
     diagnostics
 }
 
-/// Find cell boundaries in table content.
+/// Parsed cell specifier (content before `|`).
 ///
-/// Returns a list of byte-offset pairs `(start, end)` for each cell's content,
-/// relative to the original source string.
-fn find_cell_boundaries(content: &str, base_offset: usize) -> Vec<(usize, usize)> {
-    let mut cells = Vec::new();
+/// Format: `[colspan][.rowspan][+][halign][valign][style]`
+/// Examples: `2+`, `.3+`, `2.3+`, `>`, `.^`, `a`, `s`, `3*>s`
+#[derive(Debug, Clone, Default)]
+struct CellSpec {
+    /// Number of columns this cell spans (default 1).
+    colspan: usize,
+    /// Number of rows this cell spans (default 1).
+    rowspan: usize,
+    /// Content style: `a` (asciidoc), `e` (emphasis), `l` (literal),
+    /// `m` (monospace), `s` (strong), `h` (header).
+    style: Option<char>,
+    /// Horizontal alignment: `<` (left), `>` (right), `^` (center).
+    halign: Option<char>,
+    /// Vertical alignment: `.<` (top), `.>` (bottom), `.^` (middle).
+    valign: Option<char>,
+    /// Duplication factor (e.g., `3*` duplicates cell content into 3 cells).
+    duplication: usize,
+}
+
+/// Parse a cell specifier string (content between previous cell end and `|`).
+fn parse_cell_spec(spec: &str) -> CellSpec {
+    let spec = spec.trim();
+    if spec.is_empty() {
+        return CellSpec {
+            colspan: 1,
+            rowspan: 1,
+            duplication: 1,
+            ..CellSpec::default()
+        };
+    }
+
+    let mut result = CellSpec {
+        colspan: 1,
+        rowspan: 1,
+        duplication: 1,
+        ..CellSpec::default()
+    };
+
+    let bytes = spec.as_bytes();
     let mut i = 0;
-    let bytes = content.as_bytes();
 
-    while i < bytes.len() {
-        if bytes[i] == b'|' {
-            // Start of a new cell - find the content
-            let cell_content_start = i + 1;
+    // Parse leading number (could be colspan, duplication, or just a number)
+    let first_num = parse_number(bytes, &mut i);
 
-            // Scan forward for the next unescaped `|` or end of content
-            let mut j = cell_content_start;
-            while j < bytes.len() {
-                if bytes[j] == b'|' && (j == 0 || bytes[j - 1] != b'\\') {
-                    break;
-                }
-                j += 1;
+    if i < bytes.len() && bytes[i] == b'.' {
+        // colspan.rowspan pattern
+        if let Some(n) = first_num {
+            result.colspan = n;
+        }
+        i += 1; // skip '.'
+        let row_num = parse_number(bytes, &mut i);
+        if i < bytes.len() && bytes[i] == b'+' {
+            // colspan.rowspan+
+            result.rowspan = row_num.unwrap_or(1);
+            i += 1;
+        } else if let Some(n) = row_num {
+            // Could be .N+ (rowspan only, no colspan prefix)
+            // But we already consumed the dot after a number, so this is colspan.rowspan
+            result.rowspan = n;
+            // Check for + after
+            if i < bytes.len() && bytes[i] == b'+' {
+                i += 1;
             }
+        } else {
+            // Just a dot followed by alignment chars: .^ or .< or .>
+            // The dot was a valign indicator
+            // Reparse: first_num was colspan? No - back up.
+            // Actually if first_num is set and we got `.` with no number after,
+            // this could be `2.^` meaning colspan=2, valign=^
+            if i < bytes.len() && matches!(bytes[i], b'^' | b'<' | b'>') {
+                result.valign = Some(bytes[i] as char);
+                i += 1;
+            }
+        }
+    } else if i < bytes.len() && bytes[i] == b'+' {
+        // N+ pattern: colspan only
+        if let Some(n) = first_num {
+            result.colspan = n;
+        }
+        i += 1;
+    } else if i < bytes.len() && bytes[i] == b'*' {
+        // N* pattern: duplication
+        if let Some(n) = first_num {
+            result.duplication = n;
+        }
+        i += 1;
+    }
 
-            let cell_text = &content[cell_content_start..j];
-            let trimmed = cell_text.trim();
+    // If we had no first_num and first char is '.', parse rowspan
+    if first_num.is_none() && i == 0 && !bytes.is_empty() && bytes[0] == b'.' {
+        i = 1; // skip '.'
+        let row_num = parse_number(bytes, &mut i);
+        if i < bytes.len() && bytes[i] == b'+' {
+            result.rowspan = row_num.unwrap_or(1);
+            i += 1;
+        } else if let Some(_n) = row_num {
+            // .N without + is valign position? No - .2+ is rowspan.
+            // Just .N isn't standard, treat as nothing special
+        } else if i < bytes.len() && matches!(bytes[i], b'^' | b'<' | b'>') {
+            // .^ or .< or .> is vertical alignment
+            result.valign = Some(bytes[i] as char);
+            i += 1;
+        }
+    }
+
+    // Parse remaining: alignment and style chars
+    while i < bytes.len() {
+        match bytes[i] {
+            b'<' | b'>' | b'^' => {
+                if result.halign.is_none() {
+                    result.halign = Some(bytes[i] as char);
+                }
+            }
+            b'a' | b'e' | b'l' | b'm' | b's' | b'h' | b'd' => {
+                result.style = Some(bytes[i] as char);
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    result
+}
+
+/// Parse a decimal number from bytes starting at position `i`, advancing `i`.
+fn parse_number(bytes: &[u8], i: &mut usize) -> Option<usize> {
+    let start = *i;
+    while *i < bytes.len() && bytes[*i].is_ascii_digit() {
+        *i += 1;
+    }
+    if *i > start {
+        std::str::from_utf8(&bytes[start..*i])
+            .ok()
+            .and_then(|s| s.parse().ok())
+    } else {
+        None
+    }
+}
+
+/// Info about a parsed table cell.
+#[derive(Debug, Clone)]
+struct CellInfo {
+    /// Content span (start, end) as byte offsets into source.
+    content_start: usize,
+    content_end: usize,
+    /// Cell specifier parsed from content before the `|`.
+    spec: CellSpec,
+}
+
+/// Find cells in table content, parsing cell specifiers.
+///
+/// In `AsciiDoc`, a cell specifier appears immediately before the `|` that starts
+/// a cell. At the start of a line, text before the first `|` is treated as a
+/// specifier. Between cells on the same line, text after a space following cell
+/// content is treated as a specifier for the next cell.
+fn find_cells(content: &str, base_offset: usize) -> Vec<CellInfo> {
+    let mut cells = Vec::new();
+
+    // Find all pipe positions that start cells
+    let mut pipe_positions: Vec<usize> = Vec::new();
+    let bytes = content.as_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b'|' && (i == 0 || bytes[i - 1] != b'\\') {
+            pipe_positions.push(i);
+        }
+    }
+
+    for (pipe_idx, &pipe_pos) in pipe_positions.iter().enumerate() {
+        // Extract specifier: text on the same line before this pipe
+        let spec = extract_spec_before_pipe(content, pipe_pos);
+
+        let cell_content_start = pipe_pos + 1;
+        let cell_content_end = if pipe_idx + 1 < pipe_positions.len() {
+            let next_pipe = pipe_positions[pipe_idx + 1];
+            // Content ends before the next pipe's specifier
+            let spec_len = spec_length_before_pipe(content, next_pipe);
+            next_pipe - spec_len
+        } else {
+            content.len()
+        };
+
+        let cell_text = &content[cell_content_start..cell_content_end];
+        let trimmed = cell_text.trim();
+
+        let duplication = spec.duplication.max(1);
+        for _ in 0..duplication {
             if trimmed.is_empty() {
-                // Empty cell - still track it with zero-width span
-                cells.push((
-                    base_offset + cell_content_start,
-                    base_offset + cell_content_start,
-                ));
+                cells.push(CellInfo {
+                    content_start: base_offset + cell_content_start,
+                    content_end: base_offset + cell_content_start,
+                    spec: spec.clone(),
+                });
             } else {
-                // Find the trimmed content's offset within the cell
                 let leading_ws = cell_text.len() - cell_text.trim_start().len();
                 let start = base_offset + cell_content_start + leading_ws;
                 let end = start + trimmed.len();
-                cells.push((start, end));
+                cells.push(CellInfo {
+                    content_start: start,
+                    content_end: end,
+                    spec: spec.clone(),
+                });
             }
-
-            i = j; // next iteration will see the `|` and start a new cell
-        } else {
-            i += 1;
         }
     }
 
     cells
 }
 
+/// Extract a cell specifier from text immediately before a pipe character.
+///
+/// Looks backward from the pipe position to find specifier characters.
+/// A specifier is a short sequence of spec characters at the start of a line
+/// or after whitespace.
+fn extract_spec_before_pipe(content: &str, pipe_pos: usize) -> CellSpec {
+    let default_spec = CellSpec {
+        colspan: 1,
+        rowspan: 1,
+        duplication: 1,
+        ..CellSpec::default()
+    };
+
+    if pipe_pos == 0 {
+        return default_spec;
+    }
+
+    // Walk backward from pipe to find the spec text
+    let bytes = content.as_bytes();
+    let mut start = pipe_pos;
+    while start > 0 {
+        let prev = bytes[start - 1];
+        if is_spec_char(prev) {
+            start -= 1;
+        } else {
+            break;
+        }
+    }
+
+    if start == pipe_pos {
+        return default_spec;
+    }
+
+    // Spec must be at start of line or preceded by whitespace
+    if start > 0 && !bytes[start - 1].is_ascii_whitespace() {
+        return default_spec;
+    }
+
+    let spec_text = &content[start..pipe_pos];
+    parse_cell_spec(spec_text)
+}
+
+/// Calculate the length of a specifier before a pipe position.
+fn spec_length_before_pipe(content: &str, pipe_pos: usize) -> usize {
+    if pipe_pos == 0 {
+        return 0;
+    }
+
+    let bytes = content.as_bytes();
+    let mut start = pipe_pos;
+    while start > 0 && is_spec_char(bytes[start - 1]) {
+        start -= 1;
+    }
+
+    // Spec must be at start of line or preceded by whitespace
+    if start < pipe_pos && (start == 0 || bytes[start - 1].is_ascii_whitespace()) {
+        pipe_pos - start
+    } else {
+        0
+    }
+}
+
+/// Check if a byte is a valid cell specifier character.
+fn is_spec_char(b: u8) -> bool {
+    b.is_ascii_digit()
+        || matches!(
+            b,
+            b'.' | b'+'
+                | b'*'
+                | b'<'
+                | b'>'
+                | b'^'
+                | b'a'
+                | b'e'
+                | b'l'
+                | b'm'
+                | b's'
+                | b'h'
+                | b'd'
+        )
+}
+
+/// Parse the `cols` attribute to determine column count.
+///
+/// Supported formats:
+/// - `"1,2,3"` → 3 columns
+/// - `"3*"` → 3 columns
+/// - `"2*,1"` → 3 columns (2 from multiplier + 1)
+/// - `"<,^,>"` → 3 columns (alignment-only specs)
+/// - `".^~,3*"` → 4 columns
+fn parse_cols_count(cols: &str) -> Option<usize> {
+    if cols.is_empty() {
+        return None;
+    }
+
+    let mut count = 0;
+    for spec in cols.split(',') {
+        let spec = spec.trim();
+        if spec.is_empty() {
+            count += 1;
+            continue;
+        }
+        // Check for multiplier: N* pattern
+        if let Some(star_pos) = spec.find('*') {
+            if let Ok(n) = spec[..star_pos].trim().parse::<usize>() {
+                count += n;
+            } else {
+                count += 1;
+            }
+        } else {
+            count += 1;
+        }
+    }
+
+    if count > 0 { Some(count) } else { None }
+}
+
+/// Table parsing options derived from block attributes and options.
+struct TableOptions {
+    /// Column count from `cols` attribute, if specified.
+    col_count: Option<usize>,
+    /// Whether `%header` option is set.
+    has_header_option: bool,
+    /// Whether `%footer` option is set.
+    has_footer_option: bool,
+}
+
+/// Extract table options from a raw block's metadata.
+fn extract_table_options(raw: &RawBlock<'_>) -> TableOptions {
+    let col_count = raw
+        .named_attributes
+        .iter()
+        .find(|(k, _)| *k == "cols")
+        .and_then(|(_, v)| parse_cols_count(v));
+
+    let has_header_option = raw.options.contains(&"header");
+    let has_footer_option = raw.options.contains(&"footer");
+    TableOptions {
+        col_count,
+        has_header_option,
+        has_footer_option,
+    }
+}
+
+/// Map cell style character to a style name string.
+fn cell_style_name(ch: char) -> Option<&'static str> {
+    match ch {
+        'a' => Some("asciidoc"),
+        'e' => Some("emphasis"),
+        'l' => Some("literal"),
+        'm' => Some("monospace"),
+        's' => Some("strong"),
+        'h' => Some("header"),
+        'd' => Some("default"),
+        _ => None,
+    }
+}
+
+/// Map alignment character to alignment name.
+fn halign_name(ch: char) -> Option<&'static str> {
+    match ch {
+        '<' => Some("left"),
+        '>' => Some("right"),
+        '^' => Some("center"),
+        _ => None,
+    }
+}
+
+/// Map vertical alignment character to alignment name.
+fn valign_name(ch: char) -> Option<&'static str> {
+    match ch {
+        '<' => Some("top"),
+        '>' => Some("bottom"),
+        '^' => Some("middle"),
+        _ => None,
+    }
+}
+
+/// Split table content into row groups separated by blank lines.
+///
+/// Returns parallel vectors of group slices and their byte offsets into source.
+fn split_row_groups(content: &str, base_offset: usize) -> (Vec<&str>, Vec<usize>) {
+    let mut groups: Vec<&str> = Vec::new();
+    let mut offsets: Vec<usize> = Vec::new();
+    let mut current_start: Option<usize> = None;
+    let mut offset: usize = 0;
+
+    for line in content.split('\n') {
+        if line.trim().is_empty() {
+            if let Some(start) = current_start.take() {
+                let end = offset.saturating_sub(1).max(start);
+                if start < content.len() && start <= end {
+                    groups.push(&content[start..end]);
+                    offsets.push(base_offset + start);
+                }
+            }
+        } else if current_start.is_none() {
+            current_start = Some(offset);
+        }
+        offset += line.len() + 1;
+    }
+
+    if let Some(start) = current_start {
+        let end = content.len();
+        if start < end {
+            groups.push(&content[start..end]);
+            offsets.push(base_offset + start);
+        }
+    }
+
+    (groups, offsets)
+}
+
 /// Parse table content into rows and cells.
 ///
 /// Table content between `|===` delimiters is parsed as follows:
-/// - `|` characters delimit cells
+/// - `|` characters delimit cells, with optional specifiers before `|`
 /// - Blank lines separate rows
-/// - If no blank lines, cells are auto-distributed based on column count from first row
-/// - The first row is marked as a header if followed by a blank line
+/// - If no blank lines, cells are auto-distributed based on column count
+/// - Column count is determined from `cols` attribute, else from first row
+/// - `%header`/`%footer` options mark first/last rows
+/// - Implicit header: first row followed by blank line (when no `%header`)
+/// - Cell specifiers control colspan, rowspan, alignment, and content style
 fn parse_table_content<'src>(
     content_span: SourceSpan,
     source: &'src str,
     idx: &SourceIndex,
+    options: &TableOptions,
+    id_registry: &mut HashMap<String, usize>,
 ) -> (Vec<Block<'src>>, Vec<ParseDiagnostic>) {
     let content = &source[content_span.start..content_span.end];
     let mut diagnostics = Vec::new();
     let mut all_rows: Vec<Block<'src>> = Vec::new();
 
-    // Split content into row groups by blank lines
-    let mut row_groups: Vec<&str> = Vec::new();
-    let mut row_group_offsets: Vec<usize> = Vec::new();
-    let mut current_start: Option<usize> = None;
-
-    for (line_idx, line) in content.split('\n').enumerate() {
-        let line_offset: usize = if line_idx == 0 {
-            0
-        } else {
-            content[..content
-                .match_indices('\n')
-                .nth(line_idx - 1)
-                .map_or(0, |(pos, _)| pos + 1)]
-                .len()
-        };
-
-        if line.trim().is_empty() {
-            // Blank line - end current group
-            if let Some(start) = current_start.take() {
-                let end = line_offset.saturating_sub(1).max(start);
-                if start < content.len() && start <= end {
-                    row_groups.push(&content[start..end]);
-                    row_group_offsets.push(content_span.start + start);
-                }
-            }
-        } else if current_start.is_none() {
-            current_start = Some(line_offset);
-        }
-    }
-
-    // Handle the last group
-    if let Some(start) = current_start {
-        let end = content.len();
-        if start < end {
-            row_groups.push(&content[start..end]);
-            row_group_offsets.push(content_span.start + start);
-        }
-    }
+    let (row_groups, row_group_offsets) = split_row_groups(content, content_span.start);
 
     if row_groups.is_empty() {
         return (all_rows, diagnostics);
     }
 
-    // Detect implicit header: first group followed by a blank line
-    let has_header = row_groups.len() > 1
-        || (row_groups.len() == 1 && {
-            // Check if there's a blank line after first non-blank content
-            let first_group_end = row_group_offsets[0] - content_span.start + row_groups[0].len();
-            first_group_end < content.len()
-        });
+    // Detect implicit header: first group followed by a blank line (and no explicit %header)
+    let has_implicit_header = !options.has_header_option && row_groups.len() > 1;
 
-    // Determine column count from the first LINE of the first group
-    let first_line = row_groups[0].split('\n').next().unwrap_or("");
-    let first_line_cells = find_cell_boundaries(first_line, row_group_offsets[0]);
-    let col_count = first_line_cells.len().max(1);
+    // Determine column count
+    let col_count = if let Some(c) = options.col_count {
+        c
+    } else {
+        // Auto-detect from first line of first group
+        let first_line = row_groups[0].split('\n').next().unwrap_or("");
+        let first_line_cells = find_cells(first_line, row_group_offsets[0]);
+        first_line_cells.len().max(1)
+    };
 
-    // Process each row group
+    // Process each row group into rows
+    let total_groups = row_groups.len();
     for (group_idx, (group, base_offset)) in
         row_groups.iter().zip(row_group_offsets.iter()).enumerate()
     {
-        let cells = find_cell_boundaries(group, *base_offset);
+        let cells = find_cells(group, *base_offset);
 
         if cells.is_empty() {
             continue;
         }
 
         // If we have blank-line-separated groups, each group is one row
-        // If cells need auto-wrapping (single group, no blank lines), distribute by col_count
-        let rows_of_cells: Vec<Vec<(usize, usize)>> = if row_groups.len() > 1 {
-            // Blank-line separated: each group is one row
+        // Otherwise, auto-distribute cells into rows based on column count
+        let rows_of_cells: Vec<Vec<CellInfo>> = if total_groups > 1 {
             vec![cells]
         } else {
-            // Auto-distribute cells into rows based on column count
-            cells
-                .chunks(col_count)
-                .map(<[(usize, usize)]>::to_vec)
-                .collect()
+            cells.chunks(col_count).map(<[CellInfo]>::to_vec).collect()
         };
 
+        let total_rows_in_group = rows_of_cells.len();
         for (row_idx, row_cells) in rows_of_cells.into_iter().enumerate() {
-            let is_header = has_header && group_idx == 0 && row_idx == 0 && row_groups.len() > 1;
+            // Determine row variant
+            let is_header = (options.has_header_option || has_implicit_header)
+                && group_idx == 0
+                && row_idx == 0;
+            let is_footer = options.has_footer_option
+                && group_idx == total_groups - 1
+                && row_idx == total_rows_in_group - 1;
 
             let mut row_block = Block::new("tableRow");
             if is_header {
                 row_block.variant = Some("header");
+            } else if is_footer {
+                row_block.variant = Some("footer");
             }
 
             let mut cell_blocks = Vec::with_capacity(row_cells.len());
-            for (cell_start, cell_end) in row_cells {
+            for cell_info in row_cells {
                 let mut cell_block = Block::new("tableCell");
 
-                if cell_start < cell_end {
+                // Apply cell specifier to block
+                apply_cell_spec(&cell_info.spec, &mut cell_block);
+
+                if cell_info.content_start < cell_info.content_end {
                     let cell_span = SourceSpan {
-                        start: cell_start,
-                        end: cell_end,
+                        start: cell_info.content_start,
+                        end: cell_info.content_end,
                     };
-                    let (inlines, diags) = parse_span_as_inlines(cell_span, source, idx);
-                    diagnostics.extend(diags);
-                    cell_block.inlines = Some(inlines);
+
+                    // Parse content based on cell style
+                    if cell_info.spec.style == Some('a') {
+                        // AsciiDoc cell: parse as blocks
+                        let (blocks, diags) =
+                            parse_span_as_blocks(cell_span, source, idx, id_registry);
+                        diagnostics.extend(diags);
+                        cell_block.blocks = Some(blocks);
+                    } else {
+                        let (inlines, diags) = parse_span_as_inlines(cell_span, source, idx);
+                        diagnostics.extend(diags);
+                        cell_block.inlines = Some(inlines);
+                    }
                     cell_block.location = Some(idx.location(&cell_span));
+                } else if cell_info.spec.style == Some('a') {
+                    cell_block.blocks = Some(vec![]);
                 } else {
                     cell_block.inlines = Some(vec![]);
                 }
@@ -457,6 +820,54 @@ fn parse_table_content<'src>(
     (all_rows, diagnostics)
 }
 
+/// Apply a cell specifier to a cell Block, setting metadata attributes.
+fn apply_cell_spec(spec: &CellSpec, cell: &mut Block<'_>) {
+    let mut attrs: SmallVec<[(&str, &str); 4]> = SmallVec::new();
+
+    if spec.colspan > 1 {
+        // Store as a leaked string to get 'static lifetime — acceptable for small counts
+        attrs.push(("colspan", leak_usize(spec.colspan)));
+    }
+    if spec.rowspan > 1 {
+        attrs.push(("rowspan", leak_usize(spec.rowspan)));
+    }
+    if let Some(h) = spec.halign.and_then(halign_name) {
+        attrs.push(("halign", h));
+    }
+    if let Some(v) = spec.valign.and_then(valign_name) {
+        attrs.push(("valign", v));
+    }
+
+    if let Some(style_name) = spec.style.and_then(cell_style_name) {
+        cell.style = Some(style_name);
+    }
+
+    if !attrs.is_empty() {
+        cell.metadata = Some(BlockMetadata {
+            roles: SmallVec::new(),
+            options: SmallVec::new(),
+            attributes: attrs,
+        });
+    }
+}
+
+/// Convert a usize to a &'static str. Uses a small set of pre-allocated strings
+/// for common values, falling back to a leaked allocation for larger numbers.
+fn leak_usize(n: usize) -> &'static str {
+    match n {
+        2 => "2",
+        3 => "3",
+        4 => "4",
+        5 => "5",
+        6 => "6",
+        7 => "7",
+        8 => "8",
+        9 => "9",
+        10 => "10",
+        _ => Box::leak(n.to_string().into_boxed_str()),
+    }
+}
+
 /// Handle content parsing based on block type.
 fn handle_block_content<'src>(
     raw: &mut RawBlock<'src>,
@@ -465,6 +876,7 @@ fn handle_block_content<'src>(
     source: &'src str,
     idx: &SourceIndex,
     id_registry: &mut HashMap<String, usize>,
+    table_options: &TableOptions,
 ) -> Vec<ParseDiagnostic> {
     let mut diagnostics = Vec::new();
 
@@ -529,7 +941,8 @@ fn handle_block_content<'src>(
 
         "table" => {
             if let Some(content_span) = raw.content_span {
-                let (rows, diags) = parse_table_content(content_span, source, idx);
+                let (rows, diags) =
+                    parse_table_content(content_span, source, idx, table_options, id_registry);
                 diagnostics.extend(diags);
                 block.items = Some(rows);
             } else {
@@ -574,6 +987,17 @@ fn transform_raw_block_inner<'src>(
 
     // Analyze style and extract promoted name, language, etc.
     let promotion = analyze_style_promotion(&raw);
+
+    // Extract table options before roles/options are taken
+    let table_options = if promotion.name == "table" {
+        extract_table_options(&raw)
+    } else {
+        TableOptions {
+            col_count: None,
+            has_header_option: false,
+            has_footer_option: false,
+        }
+    };
 
     // Build the block with basic fields
     let mut block = Block::new(promotion.name);
@@ -656,6 +1080,7 @@ fn transform_raw_block_inner<'src>(
         source,
         idx,
         id_registry,
+        &table_options,
     );
     diagnostics.extend(content_diags);
 
@@ -964,5 +1389,280 @@ mod tests {
             let cells = row.items.as_ref().expect("row should have cells");
             assert_eq!(cells.len(), 3);
         }
+    }
+
+    // Phase 2 tests: cols attribute, %header/%footer, cell specifiers, cell styles
+
+    #[test]
+    fn test_parse_cols_count() {
+        assert_eq!(parse_cols_count("1,2,3"), Some(3));
+        assert_eq!(parse_cols_count("3*"), Some(3));
+        assert_eq!(parse_cols_count("2*,1"), Some(3));
+        assert_eq!(parse_cols_count("<,^,>"), Some(3));
+        assert_eq!(parse_cols_count(""), None);
+        assert_eq!(parse_cols_count("1"), Some(1));
+        assert_eq!(parse_cols_count("1,1,1,1"), Some(4));
+    }
+
+    #[test]
+    fn test_table_cols_multiplier() {
+        // cols="3*" means 3 columns, so 6 cells → 2 rows
+        let source = "[cols=\"3*\"]\n|===\n|A |B |C |D |E |F\n|===\n";
+        let tokens = lex(source);
+        let idx = SourceIndex::new(source);
+
+        let (raw_blocks, _) = super::super::boundary::parse_raw_blocks(&tokens, source, &idx);
+        let (blocks, diags) = transform_raw_blocks(raw_blocks, source, &idx);
+
+        assert!(diags.is_empty(), "diagnostics: {diags:?}");
+
+        let rows = blocks[0].items.as_ref().expect("should have rows");
+        assert_eq!(rows.len(), 2, "6 cells / 3 cols = 2 rows");
+        for row in rows {
+            let cells = row.items.as_ref().expect("row should have cells");
+            assert_eq!(cells.len(), 3);
+        }
+    }
+
+    #[test]
+    fn test_table_cols_multiplier_4() {
+        // cols="4*" means 4 columns
+        let source = "[cols=\"4*\"]\n|===\n|A |B |C |D |E |F |G |H\n|===\n";
+        let tokens = lex(source);
+        let idx = SourceIndex::new(source);
+
+        let (raw_blocks, _) = super::super::boundary::parse_raw_blocks(&tokens, source, &idx);
+        let (blocks, diags) = transform_raw_blocks(raw_blocks, source, &idx);
+
+        assert!(diags.is_empty(), "diagnostics: {diags:?}");
+
+        let rows = blocks[0].items.as_ref().expect("should have rows");
+        assert_eq!(rows.len(), 2, "8 cells / 4 cols = 2 rows");
+        for row in rows {
+            let cells = row.items.as_ref().expect("row should have cells");
+            assert_eq!(cells.len(), 4);
+        }
+    }
+
+    #[test]
+    fn test_table_explicit_header_option() {
+        // [%header] marks first row as header even without blank line
+        let source = "[%header]\n|===\n|H1 |H2\n|C1 |C2\n|===\n";
+        let tokens = lex(source);
+        let idx = SourceIndex::new(source);
+
+        let (raw_blocks, _) = super::super::boundary::parse_raw_blocks(&tokens, source, &idx);
+        let (blocks, diags) = transform_raw_blocks(raw_blocks, source, &idx);
+
+        assert!(diags.is_empty(), "diagnostics: {diags:?}");
+
+        let rows = blocks[0].items.as_ref().expect("should have rows");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].variant, Some("header"));
+        assert!(rows[1].variant.is_none());
+    }
+
+    #[test]
+    fn test_table_footer_option() {
+        // [%footer] marks last row as footer
+        let source = "[%footer]\n|===\n|C1 |C2\n|F1 |F2\n|===\n";
+        let tokens = lex(source);
+        let idx = SourceIndex::new(source);
+
+        let (raw_blocks, _) = super::super::boundary::parse_raw_blocks(&tokens, source, &idx);
+        let (blocks, diags) = transform_raw_blocks(raw_blocks, source, &idx);
+
+        assert!(diags.is_empty(), "diagnostics: {diags:?}");
+
+        let rows = blocks[0].items.as_ref().expect("should have rows");
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0].variant.is_none());
+        assert_eq!(rows[1].variant, Some("footer"));
+    }
+
+    #[test]
+    fn test_table_header_and_footer_options() {
+        // [%header%footer] marks first as header, last as footer
+        let source = "[%header%footer]\n|===\n|H1 |H2\n\n|C1 |C2\n\n|F1 |F2\n|===\n";
+        let tokens = lex(source);
+        let idx = SourceIndex::new(source);
+
+        let (raw_blocks, _) = super::super::boundary::parse_raw_blocks(&tokens, source, &idx);
+        let (blocks, diags) = transform_raw_blocks(raw_blocks, source, &idx);
+
+        assert!(diags.is_empty(), "diagnostics: {diags:?}");
+
+        let rows = blocks[0].items.as_ref().expect("should have rows");
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].variant, Some("header"));
+        assert!(rows[1].variant.is_none());
+        assert_eq!(rows[2].variant, Some("footer"));
+    }
+
+    #[test]
+    fn test_parse_cell_spec_colspan() {
+        let spec = parse_cell_spec("2+");
+        assert_eq!(spec.colspan, 2);
+        assert_eq!(spec.rowspan, 1);
+    }
+
+    #[test]
+    fn test_parse_cell_spec_rowspan() {
+        let spec = parse_cell_spec(".3+");
+        assert_eq!(spec.colspan, 1);
+        assert_eq!(spec.rowspan, 3);
+    }
+
+    #[test]
+    fn test_parse_cell_spec_colspan_rowspan() {
+        let spec = parse_cell_spec("2.3+");
+        assert_eq!(spec.colspan, 2);
+        assert_eq!(spec.rowspan, 3);
+    }
+
+    #[test]
+    fn test_parse_cell_spec_style() {
+        let spec = parse_cell_spec("a");
+        assert_eq!(spec.style, Some('a'));
+
+        let spec = parse_cell_spec("s");
+        assert_eq!(spec.style, Some('s'));
+
+        let spec = parse_cell_spec("e");
+        assert_eq!(spec.style, Some('e'));
+    }
+
+    #[test]
+    fn test_parse_cell_spec_halign() {
+        let spec = parse_cell_spec(">");
+        assert_eq!(spec.halign, Some('>'));
+
+        let spec = parse_cell_spec("<");
+        assert_eq!(spec.halign, Some('<'));
+
+        let spec = parse_cell_spec("^");
+        assert_eq!(spec.halign, Some('^'));
+    }
+
+    #[test]
+    fn test_parse_cell_spec_duplication() {
+        let spec = parse_cell_spec("3*");
+        assert_eq!(spec.duplication, 3);
+    }
+
+    #[test]
+    fn test_table_cell_colspan() {
+        let source = "|===\n2+|spans two |normal\n|===\n";
+        let tokens = lex(source);
+        let idx = SourceIndex::new(source);
+
+        let (raw_blocks, _) = super::super::boundary::parse_raw_blocks(&tokens, source, &idx);
+        let (blocks, diags) = transform_raw_blocks(raw_blocks, source, &idx);
+
+        assert!(diags.is_empty(), "diagnostics: {diags:?}");
+
+        let rows = blocks[0].items.as_ref().expect("should have rows");
+        let cells = rows[0].items.as_ref().expect("should have cells");
+        assert_eq!(cells.len(), 2);
+
+        // First cell should have colspan=2
+        let meta = cells[0]
+            .metadata
+            .as_ref()
+            .expect("cell should have metadata");
+        let colspan = meta
+            .attributes
+            .iter()
+            .find(|(k, _)| *k == "colspan")
+            .map(|(_, v)| *v);
+        assert_eq!(colspan, Some("2"));
+    }
+
+    #[test]
+    fn test_table_cell_style_asciidoc() {
+        // a| means parse content as AsciiDoc (blocks)
+        let source = "|===\na|Some *bold* paragraph |normal\n|===\n";
+        let tokens = lex(source);
+        let idx = SourceIndex::new(source);
+
+        let (raw_blocks, _) = super::super::boundary::parse_raw_blocks(&tokens, source, &idx);
+        let (blocks, diags) = transform_raw_blocks(raw_blocks, source, &idx);
+
+        assert!(diags.is_empty(), "diagnostics: {diags:?}");
+
+        let rows = blocks[0].items.as_ref().expect("should have rows");
+        let cells = rows[0].items.as_ref().expect("should have cells");
+
+        // First cell should have style "asciidoc" and blocks (not inlines)
+        assert_eq!(cells[0].style, Some("asciidoc"));
+        assert!(
+            cells[0].blocks.is_some(),
+            "asciidoc cell should have blocks"
+        );
+        assert!(
+            cells[0].inlines.is_none(),
+            "asciidoc cell should not have inlines"
+        );
+    }
+
+    #[test]
+    fn test_table_cell_style_strong() {
+        let source = "|===\ns|strong cell |normal\n|===\n";
+        let tokens = lex(source);
+        let idx = SourceIndex::new(source);
+
+        let (raw_blocks, _) = super::super::boundary::parse_raw_blocks(&tokens, source, &idx);
+        let (blocks, diags) = transform_raw_blocks(raw_blocks, source, &idx);
+
+        assert!(diags.is_empty(), "diagnostics: {diags:?}");
+
+        let rows = blocks[0].items.as_ref().expect("should have rows");
+        let cells = rows[0].items.as_ref().expect("should have cells");
+
+        assert_eq!(cells[0].style, Some("strong"));
+    }
+
+    #[test]
+    fn test_table_cell_halign() {
+        let source = "|===\n>|right |normal\n|===\n";
+        let tokens = lex(source);
+        let idx = SourceIndex::new(source);
+
+        let (raw_blocks, _) = super::super::boundary::parse_raw_blocks(&tokens, source, &idx);
+        let (blocks, diags) = transform_raw_blocks(raw_blocks, source, &idx);
+
+        assert!(diags.is_empty(), "diagnostics: {diags:?}");
+
+        let rows = blocks[0].items.as_ref().expect("should have rows");
+        let cells = rows[0].items.as_ref().expect("should have cells");
+
+        let meta = cells[0]
+            .metadata
+            .as_ref()
+            .expect("cell should have metadata");
+        let halign = meta
+            .attributes
+            .iter()
+            .find(|(k, _)| *k == "halign")
+            .map(|(_, v)| *v);
+        assert_eq!(halign, Some("right"));
+    }
+
+    #[test]
+    fn test_table_cell_duplication() {
+        // 3*| duplicates empty cell 3 times
+        let source = "[cols=\"3*\"]\n|===\n3*|same\n|===\n";
+        let tokens = lex(source);
+        let idx = SourceIndex::new(source);
+
+        let (raw_blocks, _) = super::super::boundary::parse_raw_blocks(&tokens, source, &idx);
+        let (blocks, diags) = transform_raw_blocks(raw_blocks, source, &idx);
+
+        assert!(diags.is_empty(), "diagnostics: {diags:?}");
+
+        let rows = blocks[0].items.as_ref().expect("should have rows");
+        assert_eq!(rows.len(), 1);
+        let cells = rows[0].items.as_ref().expect("should have cells");
+        assert_eq!(cells.len(), 3, "3* should produce 3 cells");
     }
 }
