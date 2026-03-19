@@ -66,6 +66,9 @@ fn static_block_name(name: &str) -> &'static str {
         "image" => "image",
         "verse" => "verse",
         "stem" => "stem",
+        "table" => "table",
+        "tableRow" => "tableRow",
+        "tableCell" => "tableCell",
         _ => "paragraph",
     }
 }
@@ -266,6 +269,194 @@ fn handle_list_item_content<'src>(
     diagnostics
 }
 
+/// Find cell boundaries in table content.
+///
+/// Returns a list of byte-offset pairs `(start, end)` for each cell's content,
+/// relative to the original source string.
+fn find_cell_boundaries(content: &str, base_offset: usize) -> Vec<(usize, usize)> {
+    let mut cells = Vec::new();
+    let mut i = 0;
+    let bytes = content.as_bytes();
+
+    while i < bytes.len() {
+        if bytes[i] == b'|' {
+            // Start of a new cell - find the content
+            let cell_content_start = i + 1;
+
+            // Scan forward for the next unescaped `|` or end of content
+            let mut j = cell_content_start;
+            while j < bytes.len() {
+                if bytes[j] == b'|' && (j == 0 || bytes[j - 1] != b'\\') {
+                    break;
+                }
+                j += 1;
+            }
+
+            let cell_text = &content[cell_content_start..j];
+            let trimmed = cell_text.trim();
+            if trimmed.is_empty() {
+                // Empty cell - still track it with zero-width span
+                cells.push((
+                    base_offset + cell_content_start,
+                    base_offset + cell_content_start,
+                ));
+            } else {
+                // Find the trimmed content's offset within the cell
+                let leading_ws = cell_text.len() - cell_text.trim_start().len();
+                let start = base_offset + cell_content_start + leading_ws;
+                let end = start + trimmed.len();
+                cells.push((start, end));
+            }
+
+            i = j; // next iteration will see the `|` and start a new cell
+        } else {
+            i += 1;
+        }
+    }
+
+    cells
+}
+
+/// Parse table content into rows and cells.
+///
+/// Table content between `|===` delimiters is parsed as follows:
+/// - `|` characters delimit cells
+/// - Blank lines separate rows
+/// - If no blank lines, cells are auto-distributed based on column count from first row
+/// - The first row is marked as a header if followed by a blank line
+fn parse_table_content<'src>(
+    content_span: SourceSpan,
+    source: &'src str,
+    idx: &SourceIndex,
+) -> (Vec<Block<'src>>, Vec<ParseDiagnostic>) {
+    let content = &source[content_span.start..content_span.end];
+    let mut diagnostics = Vec::new();
+    let mut all_rows: Vec<Block<'src>> = Vec::new();
+
+    // Split content into row groups by blank lines
+    let mut row_groups: Vec<&str> = Vec::new();
+    let mut row_group_offsets: Vec<usize> = Vec::new();
+    let mut current_start: Option<usize> = None;
+
+    for (line_idx, line) in content.split('\n').enumerate() {
+        let line_offset: usize = if line_idx == 0 {
+            0
+        } else {
+            content[..content
+                .match_indices('\n')
+                .nth(line_idx - 1)
+                .map_or(0, |(pos, _)| pos + 1)]
+                .len()
+        };
+
+        if line.trim().is_empty() {
+            // Blank line - end current group
+            if let Some(start) = current_start.take() {
+                let end = line_offset.saturating_sub(1).max(start);
+                if start < content.len() && start <= end {
+                    row_groups.push(&content[start..end]);
+                    row_group_offsets.push(content_span.start + start);
+                }
+            }
+        } else if current_start.is_none() {
+            current_start = Some(line_offset);
+        }
+    }
+
+    // Handle the last group
+    if let Some(start) = current_start {
+        let end = content.len();
+        if start < end {
+            row_groups.push(&content[start..end]);
+            row_group_offsets.push(content_span.start + start);
+        }
+    }
+
+    if row_groups.is_empty() {
+        return (all_rows, diagnostics);
+    }
+
+    // Detect implicit header: first group followed by a blank line
+    let has_header = row_groups.len() > 1
+        || (row_groups.len() == 1 && {
+            // Check if there's a blank line after first non-blank content
+            let first_group_end = row_group_offsets[0] - content_span.start + row_groups[0].len();
+            first_group_end < content.len()
+        });
+
+    // Determine column count from the first LINE of the first group
+    let first_line = row_groups[0].split('\n').next().unwrap_or("");
+    let first_line_cells = find_cell_boundaries(first_line, row_group_offsets[0]);
+    let col_count = first_line_cells.len().max(1);
+
+    // Process each row group
+    for (group_idx, (group, base_offset)) in
+        row_groups.iter().zip(row_group_offsets.iter()).enumerate()
+    {
+        let cells = find_cell_boundaries(group, *base_offset);
+
+        if cells.is_empty() {
+            continue;
+        }
+
+        // If we have blank-line-separated groups, each group is one row
+        // If cells need auto-wrapping (single group, no blank lines), distribute by col_count
+        let rows_of_cells: Vec<Vec<(usize, usize)>> = if row_groups.len() > 1 {
+            // Blank-line separated: each group is one row
+            vec![cells]
+        } else {
+            // Auto-distribute cells into rows based on column count
+            cells
+                .chunks(col_count)
+                .map(<[(usize, usize)]>::to_vec)
+                .collect()
+        };
+
+        for (row_idx, row_cells) in rows_of_cells.into_iter().enumerate() {
+            let is_header = has_header && group_idx == 0 && row_idx == 0 && row_groups.len() > 1;
+
+            let mut row_block = Block::new("tableRow");
+            if is_header {
+                row_block.variant = Some("header");
+            }
+
+            let mut cell_blocks = Vec::with_capacity(row_cells.len());
+            for (cell_start, cell_end) in row_cells {
+                let mut cell_block = Block::new("tableCell");
+
+                if cell_start < cell_end {
+                    let cell_span = SourceSpan {
+                        start: cell_start,
+                        end: cell_end,
+                    };
+                    let (inlines, diags) = parse_span_as_inlines(cell_span, source, idx);
+                    diagnostics.extend(diags);
+                    cell_block.inlines = Some(inlines);
+                    cell_block.location = Some(idx.location(&cell_span));
+                } else {
+                    cell_block.inlines = Some(vec![]);
+                }
+
+                cell_blocks.push(cell_block);
+            }
+
+            row_block.items = Some(cell_blocks);
+
+            // Compute row location from first to last cell
+            if let Some(first_cell) = row_block.items.as_ref().and_then(|items| items.first())
+                && let Some(last_cell) = row_block.items.as_ref().and_then(|items| items.last())
+                && let (Some(first_loc), Some(last_loc)) = (first_cell.location, last_cell.location)
+            {
+                row_block.location = Some([first_loc[0], last_loc[1]]);
+            }
+
+            all_rows.push(row_block);
+        }
+    }
+
+    (all_rows, diagnostics)
+}
+
 /// Handle content parsing based on block type.
 fn handle_block_content<'src>(
     raw: &mut RawBlock<'src>,
@@ -336,7 +527,17 @@ fn handle_block_content<'src>(
             diagnostics.extend(item_diags);
         }
 
-        "break" | "heading" | "image" => {}
+        "table" => {
+            if let Some(content_span) = raw.content_span {
+                let (rows, diags) = parse_table_content(content_span, source, idx);
+                diagnostics.extend(diags);
+                block.items = Some(rows);
+            } else {
+                block.items = Some(vec![]);
+            }
+        }
+
+        "tableRow" | "tableCell" | "break" | "heading" | "image" => {}
 
         _ => {
             if let Some(content_span) = raw.content_span {
@@ -632,5 +833,136 @@ mod tests {
         // Title should be parsed as inlines
         let title = blocks[0].title.as_ref().expect("should have title");
         assert!(!title.is_empty());
+    }
+
+    #[test]
+    fn test_transform_simple_table() {
+        let source = "|===\n|Cell 1 |Cell 2\n|Cell 3 |Cell 4\n|===\n";
+        let tokens = lex(source);
+        let idx = SourceIndex::new(source);
+
+        let (raw_blocks, _) = super::super::boundary::parse_raw_blocks(&tokens, source, &idx);
+        let (blocks, diags) = transform_raw_blocks(raw_blocks, source, &idx);
+
+        assert!(diags.is_empty(), "diagnostics: {diags:?}");
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].name, "table");
+        assert_eq!(blocks[0].form, Some("delimited"));
+        assert_eq!(blocks[0].delimiter, Some("|==="));
+
+        let rows = blocks[0].items.as_ref().expect("should have rows");
+        // With no blank lines, cells are auto-distributed: 4 cells / 2 cols = 2 rows
+        assert_eq!(rows.len(), 2, "expected 2 rows, got {}", rows.len());
+
+        for row in rows {
+            assert_eq!(row.name, "tableRow");
+            let cells = row.items.as_ref().expect("row should have cells");
+            assert_eq!(cells.len(), 2);
+            for cell in cells {
+                assert_eq!(cell.name, "tableCell");
+                assert!(cell.inlines.is_some());
+            }
+        }
+    }
+
+    #[test]
+    fn test_transform_table_with_header() {
+        let source = "|===\n|Header 1 |Header 2\n\n|Cell 1 |Cell 2\n|===\n";
+        let tokens = lex(source);
+        let idx = SourceIndex::new(source);
+
+        let (raw_blocks, _) = super::super::boundary::parse_raw_blocks(&tokens, source, &idx);
+        let (blocks, diags) = transform_raw_blocks(raw_blocks, source, &idx);
+
+        assert!(diags.is_empty(), "diagnostics: {diags:?}");
+        assert_eq!(blocks.len(), 1);
+
+        let rows = blocks[0].items.as_ref().expect("should have rows");
+        assert_eq!(rows.len(), 2);
+
+        // First row should be header
+        assert_eq!(rows[0].variant, Some("header"));
+        // Second row should not be header
+        assert!(rows[1].variant.is_none());
+    }
+
+    #[test]
+    fn test_transform_table_cell_content_parsed_as_inlines() {
+        let source = "|===\n|*bold* text |plain\n|===\n";
+        let tokens = lex(source);
+        let idx = SourceIndex::new(source);
+
+        let (raw_blocks, _) = super::super::boundary::parse_raw_blocks(&tokens, source, &idx);
+        let (blocks, diags) = transform_raw_blocks(raw_blocks, source, &idx);
+
+        assert!(diags.is_empty(), "diagnostics: {diags:?}");
+
+        let rows = blocks[0].items.as_ref().expect("should have rows");
+        let cells = rows[0].items.as_ref().expect("row should have cells");
+
+        // First cell should have parsed inlines with bold
+        let inlines = cells[0].inlines.as_ref().expect("cell should have inlines");
+        assert!(
+            inlines.len() >= 2,
+            "expected at least strong + text, got {inlines:?}"
+        );
+    }
+
+    #[test]
+    fn test_transform_empty_table() {
+        let source = "|===\n|===\n";
+        let tokens = lex(source);
+        let idx = SourceIndex::new(source);
+
+        let (raw_blocks, _) = super::super::boundary::parse_raw_blocks(&tokens, source, &idx);
+        let (blocks, diags) = transform_raw_blocks(raw_blocks, source, &idx);
+
+        assert!(diags.is_empty(), "diagnostics: {diags:?}");
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].name, "table");
+        let rows = blocks[0].items.as_ref().expect("should have items");
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn test_transform_table_one_cell_per_line() {
+        let source = "|===\n|Cell A\n|Cell B\n\n|Cell C\n|Cell D\n|===\n";
+        let tokens = lex(source);
+        let idx = SourceIndex::new(source);
+
+        let (raw_blocks, _) = super::super::boundary::parse_raw_blocks(&tokens, source, &idx);
+        let (blocks, diags) = transform_raw_blocks(raw_blocks, source, &idx);
+
+        assert!(diags.is_empty(), "diagnostics: {diags:?}");
+
+        let rows = blocks[0].items.as_ref().expect("should have rows");
+        // Two blank-line-separated groups: each with 2 cells
+        assert_eq!(rows.len(), 2);
+
+        for row in rows {
+            let cells = row.items.as_ref().expect("row should have cells");
+            assert_eq!(cells.len(), 2);
+        }
+    }
+
+    #[test]
+    fn test_transform_table_auto_wrap_rows() {
+        // 6 cells with 3 detected from first "row" (all cells, no blank lines)
+        let source = "|===\n|A |B |C\n|D |E |F\n|===\n";
+        let tokens = lex(source);
+        let idx = SourceIndex::new(source);
+
+        let (raw_blocks, _) = super::super::boundary::parse_raw_blocks(&tokens, source, &idx);
+        let (blocks, diags) = transform_raw_blocks(raw_blocks, source, &idx);
+
+        assert!(diags.is_empty(), "diagnostics: {diags:?}");
+
+        let rows = blocks[0].items.as_ref().expect("should have rows");
+        assert_eq!(rows.len(), 2, "6 cells / 3 cols = 2 rows");
+
+        for row in rows {
+            let cells = row.items.as_ref().expect("row should have cells");
+            assert_eq!(cells.len(), 3);
+        }
     }
 }

@@ -10,6 +10,7 @@ mod lists;
 mod macros;
 mod metadata;
 mod sections;
+mod table;
 pub(crate) mod utility;
 mod verbatim;
 
@@ -26,6 +27,7 @@ use lists::{description_list, ordered_list, unordered_list};
 use macros::image_block_macro;
 use metadata::{block_anchor_line, block_attr_line, block_title_line};
 use sections::{markdown_heading, section_heading, setext_heading};
+use table::table_block;
 use utility::{BlockExtra, blank_lines};
 use verbatim::{fenced_code_block, listing_block, literal_block, passthrough_block};
 
@@ -173,6 +175,17 @@ where
                 count += 1;
             }
             count >= 3
+        }
+
+        // Table delimiter (|===)
+        Some(Token::Pipe) => {
+            inp.skip();
+            let mut eq_count = 0;
+            while matches!(inp.peek(), Some(Token::Eq)) {
+                inp.skip();
+                eq_count += 1;
+            }
+            eq_count >= 3 && (inp.peek().is_none() || matches!(inp.peek(), Some(Token::Newline)))
         }
 
         // Markdown heading (## Title)
@@ -328,6 +341,8 @@ where
         literal_block(source, idx).map(ParseItem::Block),
         passthrough_block(source, idx).map(ParseItem::Block),
         fenced_code_block(source, idx).map(ParseItem::Block),
+        // Table blocks (content parsed in phase 3)
+        table_block(source, idx).map(ParseItem::Block),
         // Compound blocks (content parsed in phase 3)
         example_block(source, idx).map(ParseItem::Block),
         sidebar_block(source, idx).map(ParseItem::Block),
