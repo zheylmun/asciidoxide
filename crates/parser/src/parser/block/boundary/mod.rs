@@ -1017,4 +1017,33 @@ mod tests {
         let principal = items[0].principal.as_ref().expect("should have principal");
         assert!(!principal.is_empty());
     }
+
+    #[test]
+    fn test_attr_named_with_commas() {
+        let meta = parse_attr_content(r#"cols="1,1,1""#);
+        assert_eq!(meta.named_attributes.len(), 1);
+        assert_eq!(meta.named_attributes[0], ("cols", "1,1,1"));
+    }
+
+    #[test]
+    fn test_attr_named_simple() {
+        let meta = parse_attr_content(r#"cols="3*""#);
+        assert_eq!(meta.named_attributes.len(), 1);
+        assert_eq!(meta.named_attributes[0], ("cols", "3*"));
+    }
+
+    #[test]
+    fn test_attr_mixed_positional_and_named() {
+        let meta = parse_attr_content(r#"source,cols="1,1""#);
+        assert_eq!(meta.style, Some("source"));
+        assert_eq!(meta.named_attributes.len(), 1);
+        assert_eq!(meta.named_attributes[0], ("cols", "1,1"));
+    }
+
+    #[test]
+    fn test_attr_single_quoted_value() {
+        let meta = parse_attr_content("cols='1,1,1'");
+        assert_eq!(meta.named_attributes.len(), 1);
+        assert_eq!(meta.named_attributes[0], ("cols", "1,1,1"));
+    }
 }

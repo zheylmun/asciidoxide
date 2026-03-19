@@ -29,13 +29,35 @@ where
         })
 }
 
+/// Split attribute content on commas, respecting quoted strings.
+fn split_attr_parts(content: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut in_double_quote = false;
+    let mut in_single_quote = false;
+
+    for (i, ch) in content.char_indices() {
+        match ch {
+            '"' if !in_single_quote => in_double_quote = !in_double_quote,
+            '\'' if !in_double_quote => in_single_quote = !in_single_quote,
+            ',' if !in_double_quote && !in_single_quote => {
+                parts.push(&content[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&content[start..]);
+    parts
+}
+
 /// Parse attribute content string into `PendingMetadata`.
 pub(super) fn parse_attr_content(content: &str) -> PendingMetadata<'_> {
     let mut meta = PendingMetadata::default();
 
-    // Split by comma for multiple arguments
+    // Split by comma for multiple arguments (respecting quotes)
     let mut positional_index = 0;
-    for part in content.split(',') {
+    for part in split_attr_parts(content) {
         let part = part.trim();
 
         // Check for named attribute: key=value

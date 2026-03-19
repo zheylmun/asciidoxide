@@ -1665,4 +1665,25 @@ mod tests {
         let cells = rows[0].items.as_ref().expect("should have cells");
         assert_eq!(cells.len(), 3, "3* should produce 3 cells");
     }
+
+    #[test]
+    fn test_table_cols_comma_separated() {
+        let source = "[cols=\"1,1,1\"]\n|===\n|a |b |c\n|d |e |f\n|===\n";
+        let tokens = lex(source);
+        let idx = SourceIndex::new(source);
+
+        let (raw_blocks, _) = super::super::boundary::parse_raw_blocks(&tokens, source, &idx);
+        let (blocks, diags) = transform_raw_blocks(raw_blocks, source, &idx);
+
+        assert!(diags.is_empty(), "diagnostics: {diags:?}");
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].name, "table");
+
+        let rows = blocks[0].items.as_ref().expect("should have rows");
+        assert_eq!(rows.len(), 2, "should have 2 rows with cols=\"1,1,1\"");
+        for row in rows {
+            let cells = row.items.as_ref().expect("should have cells");
+            assert_eq!(cells.len(), 3, "each row should have 3 cells");
+        }
+    }
 }
